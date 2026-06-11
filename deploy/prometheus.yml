@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'dbbridge'
+    static_configs:
+      - targets: ['dbbridge-blue:8080', 'dbbridge-green:8080']

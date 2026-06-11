@@ -1,0 +1,28 @@
+instance:
+  id: dbbridge-blue
+  metastore: redis
+  redis_addr: "redis:6379"
+  redis_password: ""
+  redis_db: 0
+  default_storage: s3
+  heartbeat_ttl: 5s
+
+server:
+  rest_addr: ":8080"
+  grpc_addr: ":9090"
+
+defaults:
+  result_ttl: 24h
+  query_timeout: 0s
+
+storage:
+  fs:
+    root: "./results"
+  s3:
+    bucket: "dbbridge"
+    region: "us-east-1"
+    endpoint: "http://minio:9000"
+    access_key_id: "minioadmin"
+    secret_access_key: "minioadmin"
+
+databases: []

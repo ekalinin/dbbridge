@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: dbbridge-redis
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    container_name: dbbridge-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+
+  # We use a helper container to automatically create the "dbbridge" bucket in Minio
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-05T20-41-45Z
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin) do echo 'Waiting for Minio...' && sleep 1; done;
+      /usr/bin/mc mb myminio/dbbridge;
+      /usr/bin/mc policy set public myminio/dbbridge;
+      exit 0;
+      "
+
+  dbbridge-blue:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: dbbridge-blue
+    ports:
+      - "8081:8080" # REST API port mapped to 8081 on host
+      - "9091:9090" # gRPC port mapped to 9091 on host
+    environment:
+      - REDIS_ADDR=redis:6379
+    volumes:
+      - ./configs/dbbridge-blue.yaml:/app/configs/dbbridge.yaml
+    depends_on:
+      - redis
+      - minio
+
+  dbbridge-green:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: dbbridge-green
+    ports:
+      - "8082:8080" # REST API port mapped to 8082 on host
+      - "9092:9090" # gRPC port mapped to 9092 on host
+    environment:
+      - REDIS_ADDR=redis:6379
+    volumes:
+      - ./configs/dbbridge-green.yaml:/app/configs/dbbridge.yaml
+    depends_on:
+      - redis
+      - minio
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: dbbridge-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - dbbridge-blue
+      - dbbridge-green

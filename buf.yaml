@@ -1,0 +1,4 @@
+version: v1
+name: buf.build/dbbridge/api
+deps:
+  - buf.build/googleapis/googleapis
