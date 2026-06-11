@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -59,7 +58,7 @@ func TestEncodeStreamCSV(t *testing.T) {
 	}
 
 	buf := &bytes.Buffer{}
-	rowCount, bytesWritten, err := EncodeStream(context.Background(), stream, "csv", buf)
+	rowCount, bytesWritten, err := EncodeStream(t.Context(), stream, "csv", buf)
 	if err != nil {
 		t.Fatalf("unexpected error encoding CSV: %v", err)
 	}
@@ -87,7 +86,7 @@ func TestEncodeStreamJSONL(t *testing.T) {
 	}
 
 	buf := &bytes.Buffer{}
-	rowCount, bytesWritten, err := EncodeStream(context.Background(), stream, "jsonl", buf)
+	rowCount, bytesWritten, err := EncodeStream(t.Context(), stream, "jsonl", buf)
 	if err != nil {
 		t.Fatalf("unexpected error encoding JSONL: %v", err)
 	}

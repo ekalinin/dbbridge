@@ -72,11 +72,8 @@ func (w *clickhousePipeWriter) Close() error {
 func (s *ClickHouseResultStore) Writer(ctx context.Context, queryID string, format string) (io.WriteCloser, domain.ResultRef, error) {
 	pr, pw := io.Pipe()
 	pwWrapper := &clickhousePipeWriter{pw: pw}
-	pwWrapper.wg.Add(1)
-
 	// Async insert into ClickHouse
-	go func() {
-		defer pwWrapper.wg.Done()
+	pwWrapper.wg.Go(func() {
 		scanner := bufio.NewScanner(pr)
 		// Custom larger buffer for potentially long lines (JSONL rows can be big)
 		buf := make([]byte, 0, 64*1024)
@@ -145,7 +142,7 @@ func (s *ClickHouseResultStore) Writer(ctx context.Context, queryID string, form
 			return
 		}
 		_ = pr.Close()
-	}()
+	})
 
 	ref := domain.ResultRef{
 		Backend: "clickhouse",

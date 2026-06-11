@@ -96,13 +96,13 @@ type QueryRecord struct {
 	State           QueryState   `json:"state"`
 	OwnerInstanceID string       `json:"owner_instance_id"`
 	CreatedAt       time.Time    `json:"created_at"`
-	StartedAt       time.Time    `json:"started_at,omitempty"`
-	FinishedAt      time.Time    `json:"finished_at,omitempty"`
-	Error           *QueryError  `json:"error,omitempty"`
+	StartedAt       time.Time    `json:"started_at,omitzero"`
+	FinishedAt      time.Time    `json:"finished_at,omitzero"`
+	Error           *QueryError  `json:"error,omitzero"`
 	Stats           QueryStats   `json:"stats"`
-	Result          *ResultRef   `json:"result,omitempty"`
+	Result          *ResultRef   `json:"result,omitzero"`
 	IdempotencyKey  string       `json:"idempotency_key,omitempty"`
-	LeaseDeadline   time.Time    `json:"lease_deadline,omitempty"`
+	LeaseDeadline   time.Time    `json:"lease_deadline,omitzero"`
 }
 
 // DatabaseInfo represents static configuration and status metadata of a target database.

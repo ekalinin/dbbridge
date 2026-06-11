@@ -1,7 +1,6 @@
 package state
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -12,7 +11,7 @@ func TestMemoryMetaStoreQueries(t *testing.T) {
 	ms := NewMemoryMetaStore()
 	defer ms.Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	rec := &domain.QueryRecord{
 		ID:         "test-query",
 		DatabaseID: "pg_test",
@@ -64,7 +63,7 @@ func TestMemoryMetaStoreIdempotency(t *testing.T) {
 	ms := NewMemoryMetaStore()
 	defer ms.Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Acquire first time
 	qid, acquired, err := ms.AcquireIdempotency(ctx, "pg_test", "idem-key", "query-1", 10*time.Second)

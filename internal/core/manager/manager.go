@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"sync"
 	"time"
 
@@ -60,10 +61,9 @@ func NewQueryManager(cfgManager *config.Manager, metaStore state.MetaStore) (*Qu
 	}
 
 	// Start background workers
-	qm.wg.Add(3)
-	go qm.heartbeatWorker()
-	go qm.gcWorker()
-	go qm.controlWorker()
+	qm.wg.Go(qm.heartbeatWorker)
+	qm.wg.Go(qm.gcWorker)
+	qm.wg.Go(qm.controlWorker)
 
 	return qm, nil
 }
@@ -399,12 +399,9 @@ func (qm *QueryManager) Watch(ctx context.Context, queryID string) (<-chan Query
 		qm.watchersMu.Lock()
 		defer qm.watchersMu.Unlock()
 		list := qm.watchers[queryID]
-		for i, watcher := range list {
-			if watcher == ch {
-				qm.watchers[queryID] = append(list[:i], list[i+1:]...)
-				close(ch)
-				break
-			}
+		if i := slices.Index(list, ch); i != -1 {
+			qm.watchers[queryID] = append(list[:i], list[i+1:]...)
+			close(ch)
 		}
 	}()
 
@@ -432,7 +429,6 @@ func (qm *QueryManager) notifyWatchers(ev QueryEvent) {
 // Background workers
 
 func (qm *QueryManager) heartbeatWorker() {
-	defer qm.wg.Done()
 	ticker := time.NewTicker(qm.cfgManager.Get().Instance.HeartbeatTTL / 2)
 	defer ticker.Stop()
 
@@ -457,8 +453,6 @@ func (qm *QueryManager) heartbeatWorker() {
 }
 
 func (qm *QueryManager) controlWorker() {
-	defer qm.wg.Done()
-
 	ch, err := qm.metaStore.SubscribeControl(qm.ctx)
 	if err != nil {
 		log.Printf("ERROR: Failed to subscribe to control messages: %v", err)
@@ -487,7 +481,6 @@ func (qm *QueryManager) controlWorker() {
 }
 
 func (qm *QueryManager) gcWorker() {
-	defer qm.wg.Done()
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
@@ -525,10 +518,10 @@ func (qm *QueryManager) gcWorker() {
 
 func (qm *QueryManager) getEngine(dbID string) string {
 	cfg := qm.cfgManager.Get()
-	for _, dbCfg := range cfg.Databases {
-		if dbCfg.ID == dbID {
-			return dbCfg.Engine
-		}
+	if idx := slices.IndexFunc(cfg.Databases, func(dbCfg config.DatabaseConfig) bool {
+		return dbCfg.ID == dbID
+	}); idx != -1 {
+		return cfg.Databases[idx].Engine
 	}
 	return "unknown"
 }

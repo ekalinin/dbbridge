@@ -76,11 +76,8 @@ func (s *S3ResultStore) Writer(ctx context.Context, queryID string, format strin
 
 	pr, pw := io.Pipe()
 	pwWrapper := &pipeWriter{pw: pw}
-	pwWrapper.wg.Add(1)
-
 	// Async upload from the pipe reader
-	go func() {
-		defer pwWrapper.wg.Done()
+	pwWrapper.wg.Go(func() {
 		_, err := s.uploader.Upload(context.Background(), &s3.PutObjectInput{
 			Bucket: aws.String(s.bucket),
 			Key:    aws.String(key),
@@ -92,7 +89,7 @@ func (s *S3ResultStore) Writer(ctx context.Context, queryID string, format strin
 		} else {
 			_ = pr.Close()
 		}
-	}()
+	})
 
 	ref := domain.ResultRef{
 		Backend: "s3",
