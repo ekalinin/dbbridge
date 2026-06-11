@@ -10,6 +10,7 @@ spec:
   selector:
     app: dbbridge
   ports:
+    # REST API and WebSocket (/v1/ws) share this port
     - name: rest
       port: 8080
       targetPort: rest
