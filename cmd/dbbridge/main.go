@@ -28,9 +28,6 @@ import (
 	_ "dbbridge/internal/db/drivers/mysql"
 	_ "dbbridge/internal/db/drivers/oracle"
 	_ "dbbridge/internal/db/drivers/postgres"
-
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 func main() {
@@ -106,8 +103,11 @@ func main() {
 
 	grpcHTTP := &http.Server{
 		Addr:    cfg.Server.GRPCAddr,
-		Handler: h2c.NewHandler(grpcMux, &http2.Server{}), // h2c supports unencrypted HTTP/2
+		Handler: grpcMux,
 	}
+	grpcHTTP.Protocols = new(http.Protocols)
+	grpcHTTP.Protocols.SetHTTP1(true)
+	grpcHTTP.Protocols.SetUnencryptedHTTP2(true)
 
 	// 6. Start Servers
 	go func() {
