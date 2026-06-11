@@ -52,6 +52,15 @@ func (p *mysqlPool) Ping(ctx context.Context) error {
 	return p.db.PingContext(ctx)
 }
 
+func (p *mysqlPool) Stat() db.PoolStat {
+	s := p.db.Stats()
+	return db.PoolStat{
+		Open:  int32(s.OpenConnections),
+		Idle:  int32(s.Idle),
+		InUse: int32(s.InUse),
+	}
+}
+
 func (p *mysqlPool) Close() error {
 	return p.db.Close()
 }

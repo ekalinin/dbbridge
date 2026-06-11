@@ -1,0 +1,442 @@
+openapi: "3.1.0"
+info:
+  title: dbbridge
+  description: Fault-tolerant SQL proxy that executes queries asynchronously and persists results for later retrieval.
+  version: "1.0.0"
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      operationId: healthz
+      tags: [health]
+      responses:
+        "200":
+          description: Service is alive
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: OK
+
+  /readyz:
+    get:
+      summary: Readiness probe
+      operationId: readyz
+      tags: [health]
+      responses:
+        "200":
+          description: Service is ready to accept traffic
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: READY
+        "503":
+          description: Service is not ready
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      operationId: metrics
+      tags: [health]
+      responses:
+        "200":
+          description: Prometheus text format metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /v1/queries:
+    post:
+      summary: Start a query
+      operationId: startQuery
+      tags: [queries]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          description: Client-supplied key for deduplication. Repeated requests with the same key return the existing query.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartQueryRequest"
+      responses:
+        "202":
+          description: Query accepted (async mode)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryRecord"
+        "200":
+          description: Query completed (sync mode)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryRecord"
+        "400":
+          description: Invalid request
+        "500":
+          description: Internal error
+
+  /v1/queries/{id}:
+    get:
+      summary: Get query status
+      operationId: getQueryStatus
+      tags: [queries]
+      parameters:
+        - $ref: "#/components/parameters/queryId"
+      responses:
+        "200":
+          description: Query record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryRecord"
+        "404":
+          description: Query not found
+
+  /v1/queries/{id}:stop:
+    post:
+      summary: Stop a running query
+      operationId: stopQuery
+      tags: [queries]
+      parameters:
+        - $ref: "#/components/parameters/queryId"
+      responses:
+        "200":
+          description: Query stopped
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query_id:
+                    type: string
+                  status:
+                    type: string
+                    example: STOPPED
+        "500":
+          description: Internal error
+
+  /v1/queries/{id}/stats:
+    get:
+      summary: Get execution stats for a query
+      operationId: getQueryStats
+      tags: [queries]
+      parameters:
+        - $ref: "#/components/parameters/queryId"
+      responses:
+        "200":
+          description: Query statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryStats"
+        "404":
+          description: Query not found
+
+  /v1/queries/{id}/result:
+    get:
+      summary: Download query result
+      description: |
+        Streams the query result. Supports HTTP Range requests for partial downloads.
+        Responds with `206 Partial Content` and `Content-Range` header when a `Range` header is present.
+      operationId: downloadResult
+      tags: [queries]
+      parameters:
+        - $ref: "#/components/parameters/queryId"
+        - name: offset
+          in: query
+          description: Byte offset to start reading from (ignored if Range header is present)
+          schema:
+            type: integer
+            format: int64
+        - name: limit
+          in: query
+          description: Maximum number of bytes to read (ignored if Range header is present)
+          schema:
+            type: integer
+            format: int64
+        - name: Range
+          in: header
+          description: "HTTP byte range, e.g. `bytes=0-1023`"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Full result stream
+          content:
+            application/x-jsonlines:
+              schema:
+                type: string
+                format: binary
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: Partial content (Range request)
+          headers:
+            Content-Range:
+              description: "Byte range returned, e.g. `bytes 0-1023/4096`"
+              schema:
+                type: string
+          content:
+            application/x-jsonlines:
+              schema:
+                type: string
+                format: binary
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "416":
+          description: Range not satisfiable
+        "500":
+          description: Internal error
+
+  /v1/databases:
+    get:
+      summary: List configured databases
+      operationId: listDatabases
+      tags: [databases]
+      responses:
+        "200":
+          description: List of database infos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DatabaseInfo"
+        "500":
+          description: Internal error
+
+  /v1/ws:
+    get:
+      summary: WebSocket endpoint for query event subscriptions
+      description: |
+        Upgrade to WebSocket. After upgrade, send `{"action":"watch","query_id":"<id>"}` to subscribe.
+        The server streams `{"query_id":"...","state":"...","stats":{...},"error":null}` as state changes.
+      operationId: wsSubscribe
+      tags: [queries]
+      responses:
+        "101":
+          description: Switching Protocols
+
+  /v1/admin/reload:
+    post:
+      summary: Hot-reload configuration
+      operationId: reloadConfig
+      tags: [admin]
+      responses:
+        "200":
+          description: Config reloaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+        "500":
+          description: Reload failed
+
+  /v1/admin/can-stop:
+    get:
+      summary: Check if instance can be stopped safely
+      description: Returns `can_be_stopped=true` only when there are zero in-flight owned queries (invariant I5).
+      operationId: canIBeStopped
+      tags: [admin]
+      responses:
+        "200":
+          description: Stop readiness status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  can_be_stopped:
+                    type: boolean
+                  in_flight:
+                    type: integer
+
+components:
+  parameters:
+    queryId:
+      name: id
+      in: path
+      required: true
+      description: Query ID
+      schema:
+        type: string
+
+  schemas:
+    StartQueryRequest:
+      type: object
+      required: [database_id, sql]
+      properties:
+        database_id:
+          type: string
+          description: ID of the target database as configured in dbbridge.yaml
+        sql:
+          type: string
+          description: SQL statement to execute
+        options:
+          type: object
+          properties:
+            timeout_ms:
+              type: integer
+              format: int64
+              description: Query timeout in milliseconds; 0 means no timeout
+            mode:
+              type: string
+              enum: [async, sync]
+              default: async
+              description: async returns immediately with a query_id; sync waits for completion
+            result_ttl_seconds:
+              type: integer
+              format: int64
+              description: Seconds to retain the result; 0 uses server default
+            result_format:
+              type: string
+              enum: [jsonl, csv]
+              default: jsonl
+            storage_backend:
+              type: string
+              enum: [fs, s3, clickhouse]
+              description: Override the default storage backend for this query
+
+    QueryRecord:
+      type: object
+      properties:
+        id:
+          type: string
+        database_id:
+          type: string
+        sql:
+          type: string
+        state:
+          $ref: "#/components/schemas/QueryState"
+        owner_instance_id:
+          type: string
+        options:
+          $ref: "#/components/schemas/QueryOptions"
+        stats:
+          $ref: "#/components/schemas/QueryStats"
+        result:
+          $ref: "#/components/schemas/ResultRef"
+        error:
+          $ref: "#/components/schemas/QueryError"
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+
+    QueryState:
+      type: string
+      enum: [PENDING, RUNNING, SUCCEEDED, FAILED, CANCELED, EXPIRED]
+
+    QueryOptions:
+      type: object
+      properties:
+        timeout_ms:
+          type: integer
+          format: int64
+        mode:
+          type: string
+        result_ttl_seconds:
+          type: integer
+          format: int64
+        result_format:
+          type: string
+        storage_backend:
+          type: string
+        idempotency_key:
+          type: string
+
+    QueryStats:
+      type: object
+      properties:
+        rows_read:
+          type: integer
+          format: int64
+        bytes_written:
+          type: integer
+          format: int64
+        db_exec_duration_ms:
+          type: integer
+          format: int64
+        storage_write_duration_ms:
+          type: integer
+          format: int64
+        total_duration_ms:
+          type: integer
+          format: int64
+        retries:
+          type: integer
+
+    ResultRef:
+      type: object
+      properties:
+        backend:
+          type: string
+        locator:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        row_count:
+          type: integer
+          format: int64
+        format:
+          type: string
+        checksum:
+          type: string
+
+    QueryError:
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        retryable:
+          type: boolean
+
+    DatabaseInfo:
+      type: object
+      properties:
+        id:
+          type: string
+        engine:
+          type: string
+          enum: [postgres, mysql, clickhouse, oracle]
+        display_name:
+          type: string
+        healthy:
+          type: boolean

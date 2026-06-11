@@ -2,10 +2,12 @@ package rest
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"dbbridge/internal/core/domain"
@@ -196,21 +198,36 @@ func (s *Server) handleDownloadResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	offsetStr := r.URL.Query().Get("offset")
-	limitStr := r.URL.Query().Get("limit")
-
 	var offset, limit int64
-	var err error
-	if offsetStr != "" {
-		if offset, err = strconv.ParseInt(offsetStr, 10, 64); err != nil {
-			http.Error(w, "invalid offset: "+err.Error(), http.StatusBadRequest)
+	useRange := false
+	rangeStart, rangeEnd := int64(0), int64(0)
+
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		start, end, ok := parseByteRange(rangeHeader)
+		if !ok {
+			http.Error(w, "invalid Range header", http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
-	}
-	if limitStr != "" {
-		if limit, err = strconv.ParseInt(limitStr, 10, 64); err != nil {
-			http.Error(w, "invalid limit: "+err.Error(), http.StatusBadRequest)
-			return
+		offset = start
+		rangeStart = start
+		rangeEnd = end
+		if end >= 0 {
+			limit = end - start + 1
+		}
+		useRange = true
+	} else {
+		var err error
+		if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+			if offset, err = strconv.ParseInt(offsetStr, 10, 64); err != nil {
+				http.Error(w, "invalid offset: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+			if limit, err = strconv.ParseInt(limitStr, 10, 64); err != nil {
+				http.Error(w, "invalid limit: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 	}
 
@@ -221,7 +238,6 @@ func (s *Server) handleDownloadResult(w http.ResponseWriter, r *http.Request) {
 	}
 	defer reader.Close()
 
-	// Content-Type based on format
 	contentType := "application/octet-stream"
 	switch ref.Format {
 	case "csv":
@@ -231,13 +247,51 @@ func (s *Server) handleDownloadResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", contentType)
-	// Chunked transfer encoding is automatically used by net/http if Content-Length is not set
-	w.WriteHeader(http.StatusOK)
 
-	_, err = io.Copy(w, reader)
-	if err != nil {
+	if useRange {
+		total := ref.SizeBytes
+		totalStr := "*"
+		if total > 0 {
+			totalStr = strconv.FormatInt(total, 10)
+		}
+		end := rangeEnd
+		if end < 0 || (total > 0 && end >= total) {
+			end = total - 1
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%s", rangeStart, end, totalStr))
+		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	if _, err = io.Copy(w, reader); err != nil {
 		log.Printf("ERROR: Failed during result streaming download: %v", err)
 	}
+}
+
+// parseByteRange parses an HTTP "Range: bytes=N-M" header.
+// Returns (start, end, ok). end == -1 means open-ended (bytes=N-).
+func parseByteRange(header string) (start, end int64, ok bool) {
+	if !strings.HasPrefix(header, "bytes=") {
+		return 0, 0, false
+	}
+	spec := strings.TrimPrefix(header, "bytes=")
+	parts := strings.SplitN(spec, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	s, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || s < 0 {
+		return 0, 0, false
+	}
+	if parts[1] == "" {
+		return s, -1, true
+	}
+	e, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || e < s {
+		return 0, 0, false
+	}
+	return s, e, true
 }
 
 func (s *Server) handleListDatabases(w http.ResponseWriter, r *http.Request) {

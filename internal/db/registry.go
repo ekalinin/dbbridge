@@ -15,10 +15,18 @@ type RowStream interface {
 	Close() error
 }
 
+// PoolStat holds snapshot statistics for a connection pool.
+type PoolStat struct {
+	Open  int32
+	Idle  int32
+	InUse int32
+}
+
 // Pool represents a thread-safe connection pool to a target database.
 type Pool interface {
 	Exec(ctx context.Context, sql string) (RowStream, error)
 	Ping(ctx context.Context) error
+	Stat() PoolStat
 	Close() error
 }
 

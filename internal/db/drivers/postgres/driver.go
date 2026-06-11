@@ -50,6 +50,15 @@ func (p *postgresPool) Ping(ctx context.Context) error {
 	return p.pool.Ping(ctx)
 }
 
+func (p *postgresPool) Stat() db.PoolStat {
+	s := p.pool.Stat()
+	return db.PoolStat{
+		Open:  s.TotalConns(),
+		Idle:  s.IdleConns(),
+		InUse: s.AcquiredConns(),
+	}
+}
+
 func (p *postgresPool) Close() error {
 	p.pool.Close()
 	return nil

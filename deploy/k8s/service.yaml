@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dbbridge
+  namespace: default
+  labels:
+    app: dbbridge
+spec:
+  type: ClusterIP
+  selector:
+    app: dbbridge
+  ports:
+    - name: rest
+      port: 8080
+      targetPort: rest
+      protocol: TCP
+    - name: grpc
+      port: 9090
+      targetPort: grpc
+      protocol: TCP

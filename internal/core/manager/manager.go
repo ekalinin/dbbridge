@@ -448,6 +448,13 @@ func (qm *QueryManager) heartbeatWorker() {
 			if err := qm.metaStore.Heartbeat(qm.ctx, qm.instanceID, activeIDs, ttl); err != nil {
 				log.Printf("ERROR: MetaStore Heartbeat failed: %v", err)
 			}
+
+			qm.dbPoolsMu.RLock()
+			for dbID, pool := range qm.dbPools {
+				s := pool.Stat()
+				telemetry.RecordPoolStat(dbID, s.Open, s.Idle, s.InUse)
+			}
+			qm.dbPoolsMu.RUnlock()
 		}
 	}
 }

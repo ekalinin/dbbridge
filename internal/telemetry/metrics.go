@@ -47,6 +47,18 @@ var (
 			Help: "Total number of duplicate requests that were resolved via idempotency checks.",
 		},
 	)
+
+	// DBPoolStats tracks connection pool utilization per database.
+	// Labels: db_id, stat (open|idle|in_use).
+	// Go runtime metrics (go_goroutines, go_gc_duration_seconds, etc.) are exported
+	// automatically by the default Prometheus registry via NewGoCollector.
+	DBPoolStats = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "dbbridge_db_pool_stats",
+			Help: "Database connection pool statistics (open/idle/in_use connections) per database.",
+		},
+		[]string{"db_id", "stat"},
+	)
 )
 
 func init() {
@@ -55,6 +67,7 @@ func init() {
 	prometheus.MustRegister(InflightQueries)
 	prometheus.MustRegister(ResultBytesTotal)
 	prometheus.MustRegister(IdempotencyHitsTotal)
+	prometheus.MustRegister(DBPoolStats)
 }
 
 // RecordQueryCompleted records stats when a query succeeds, fails or gets canceled.
@@ -81,6 +94,13 @@ func RecordResultBytes(backend string, size int64) {
 // RecordIdempotencyHit increments the duplicate request counter.
 func RecordIdempotencyHit() {
 	IdempotencyHitsTotal.Inc()
+}
+
+// RecordPoolStat updates the connection pool gauge for a single database.
+func RecordPoolStat(dbID string, open, idle, inUse int32) {
+	DBPoolStats.WithLabelValues(dbID, "open").Set(float64(open))
+	DBPoolStats.WithLabelValues(dbID, "idle").Set(float64(idle))
+	DBPoolStats.WithLabelValues(dbID, "in_use").Set(float64(inUse))
 }
 
 // Handler returns the Prometheus HTTP handler for scraping metrics.
