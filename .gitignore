@@ -1,0 +1,31 @@
+# Binary
+bin/
+
+# Go build cache
+*.test
+*.out
+
+# Result files (local fs storage)
+results/
+
+# Config with secrets (keep the examples, ignore overrides)
+configs/local*.yaml
+configs/*-local.yaml
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Cursor
+.cursor/
+
+# buf cache
+.buf_cache/
+
+# macOS
+.DS_Store
+
+# Environment
+.env
+.env.*
