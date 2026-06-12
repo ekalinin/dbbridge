@@ -18,6 +18,7 @@ type InstanceConfig struct {
 	RedisDB        int           `yaml:"redis_db"`
 	DefaultStorage string        `yaml:"default_storage"` // "fs", "s3", "clickhouse"
 	HeartbeatTTL   time.Duration `yaml:"heartbeat_ttl"`   // default 5s
+	OTLPEndpoint   string        `yaml:"otlp_endpoint"`   // OTLP gRPC endpoint; empty disables OTLP export
 }
 
 // ServerConfig configures REST, gRPC and WS endpoints.

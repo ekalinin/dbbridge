@@ -17,6 +17,9 @@ import (
 	"dbbridge/internal/telemetry"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type QueryEvent struct {
@@ -64,6 +67,7 @@ func NewQueryManager(cfgManager *config.Manager, metaStore state.MetaStore) (*Qu
 	qm.wg.Go(qm.heartbeatWorker)
 	qm.wg.Go(qm.gcWorker)
 	qm.wg.Go(qm.controlWorker)
+	qm.wg.Go(qm.ownerReaper)
 
 	return qm, nil
 }
@@ -127,6 +131,18 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 
 	queryID := uuid.New().String()
 
+	// Apply defaults before idempotency check so the TTL is correct.
+	cfg := qm.cfgManager.Get()
+	if opts.ResultTTL == 0 {
+		opts.ResultTTL = cfg.Defaults.ResultTTL
+	}
+	if opts.ResultFormat == "" {
+		opts.ResultFormat = "jsonl"
+	}
+	if opts.StorageBackend == "" {
+		opts.StorageBackend = cfg.Instance.DefaultStorage
+	}
+
 	// Handle Idempotency
 	if opts.IdempotencyKey != "" {
 		existingID, acquired, err := qm.metaStore.AcquireIdempotency(ctx, dbID, opts.IdempotencyKey, queryID, opts.ResultTTL)
@@ -138,18 +154,6 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 			telemetry.RecordIdempotencyHit()
 			return qm.GetQuery(ctx, existingID)
 		}
-	}
-
-	// Handle defaults
-	cfg := qm.cfgManager.Get()
-	if opts.ResultTTL == 0 {
-		opts.ResultTTL = cfg.Defaults.ResultTTL
-	}
-	if opts.ResultFormat == "" {
-		opts.ResultFormat = "jsonl"
-	}
-	if opts.StorageBackend == "" {
-		opts.StorageBackend = cfg.Instance.DefaultStorage
 	}
 
 	record := &domain.QueryRecord{
@@ -184,14 +188,25 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 		State:   domain.StatePending,
 	})
 
+	// Snapshot the record for the async response BEFORE run() starts mutating it
+	// in its own goroutine, otherwise the caller (e.g. a transport JSON-encoding
+	// the response) races with run() over the shared *record.
+	asyncSnapshot := *record
+
+	// For sync mode, subscribe to the watcher BEFORE launching run() so a fast
+	// query cannot emit its terminal event before we are listening (avoids a hang).
+	var syncCh <-chan QueryEvent
+	if opts.Mode == "sync" {
+		syncCh, _ = qm.Watch(ctx, queryID)
+	}
+
 	// Async execution
 	go qm.run(execCtx, record, pool, cancelExec)
 
 	if opts.Mode == "sync" {
 		// Wait for execution to finish
-		ch, err := qm.Watch(ctx, queryID)
-		if err == nil {
-			for ev := range ch {
+		if syncCh != nil {
+			for ev := range syncCh {
 				if ev.State.IsTerminal() {
 					break
 				}
@@ -201,7 +216,7 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 		return qm.GetQuery(ctx, queryID)
 	}
 
-	return record, nil
+	return &asyncSnapshot, nil
 }
 
 func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, pool db.Pool, cancelExec context.CancelFunc) {
@@ -211,6 +226,13 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 		delete(qm.activeReg, record.ID)
 		qm.activeRegMu.Unlock()
 	}()
+
+	ctx, span := otel.Tracer("dbbridge").Start(ctx, "query.run",
+		trace.WithAttributes(
+			attribute.String("query.id", record.ID),
+			attribute.String("query.database_id", record.DatabaseID),
+		))
+	defer span.End()
 
 	startTime := time.Now()
 
@@ -496,30 +518,107 @@ func (qm *QueryManager) gcWorker() {
 		case <-qm.ctx.Done():
 			return
 		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			expiredIDs, err := qm.metaStore.ListExpiredQueries(ctx)
-			cancel()
+			qm.collectGarbage()
+		}
+	}
+}
 
-			if err != nil {
-				log.Printf("ERROR: GC worker failed to list expired queries: %v", err)
-				continue
+// collectGarbage transitions expired queries to EXPIRED and removes their
+// storage results and metadata. Extracted from gcWorker for testability.
+func (qm *QueryManager) collectGarbage() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	expiredIDs, err := qm.metaStore.ListExpiredQueries(ctx)
+	cancel()
+
+	if err != nil {
+		log.Printf("ERROR: GC worker failed to list expired queries: %v", err)
+		return
+	}
+
+	for _, id := range expiredIDs {
+		gcCtx, gcCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		rec, err := qm.metaStore.GetQuery(gcCtx, id)
+		if err == nil {
+			// Transition to EXPIRED before deleting (spec state machine §3).
+			if rec.State != domain.StateExpired {
+				rec.State = domain.StateExpired
+				_ = qm.metaStore.UpdateQuery(gcCtx, rec)
+				qm.notifyWatchers(QueryEvent{QueryID: id, State: domain.StateExpired})
 			}
-
-			for _, id := range expiredIDs {
-				gcCtx, gcCancel := context.WithTimeout(context.Background(), 15*time.Second)
-				rec, err := qm.metaStore.GetQuery(gcCtx, id)
-				if err == nil && rec.Result != nil {
-					store, err := storage.GetStore(rec.Result.Backend)
-					if err == nil {
-						log.Printf("GC: Deleting results storage for query %s", id)
-						_ = store.Delete(gcCtx, *rec.Result)
-					}
+			if rec.Result != nil {
+				store, err := storage.GetStore(rec.Result.Backend)
+				if err == nil {
+					log.Printf("GC: Deleting results storage for query %s", id)
+					_ = store.Delete(gcCtx, *rec.Result)
 				}
-				log.Printf("GC: Deleting metadata for expired query %s", id)
-				_ = qm.metaStore.DeleteQuery(gcCtx, id)
-				gcCancel()
 			}
 		}
+		log.Printf("GC: Deleting metadata for expired query %s", id)
+		_ = qm.metaStore.DeleteQuery(gcCtx, id)
+		gcCancel()
+	}
+}
+
+// ownerReaper detects queries whose owner instance has died (its heartbeat/lease
+// key expired) while still in a non-terminal state, and fails them with OWNER_LOST
+// (spec §3). Queries this instance is actively running are skipped.
+func (qm *QueryManager) ownerReaper() {
+	ticker := time.NewTicker(qm.cfgManager.Get().Instance.HeartbeatTTL)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-qm.ctx.Done():
+			return
+		case <-ticker.C:
+			qm.reapStaleOwners()
+		}
+	}
+}
+
+// reapStaleOwners fails non-terminal queries whose owner instance is gone.
+// Extracted from ownerReaper for testability.
+func (qm *QueryManager) reapStaleOwners() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	staleIDs, err := qm.metaStore.ListStaleQueries(ctx)
+	cancel()
+	if err != nil {
+		log.Printf("ERROR: owner reaper failed to list stale queries: %v", err)
+		return
+	}
+
+	for _, id := range staleIDs {
+		// Skip queries we own and are actively running locally.
+		qm.activeRegMu.RLock()
+		_, local := qm.activeReg[id]
+		qm.activeRegMu.RUnlock()
+		if local {
+			continue
+		}
+
+		rCtx, rCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		rec, err := qm.metaStore.GetQuery(rCtx, id)
+		if err == nil && (rec.State == domain.StateRunning || rec.State == domain.StatePending) {
+			rec.State = domain.StateFailed
+			rec.FinishedAt = time.Now()
+			rec.Error = &domain.QueryError{
+				Code:      "OWNER_LOST",
+				Message:   "owner instance lost before query completion",
+				Retryable: true,
+			}
+			if err := qm.metaStore.UpdateQuery(rCtx, rec); err != nil {
+				log.Printf("ERROR: owner reaper failed to fail query %s: %v", id, err)
+			} else {
+				log.Printf("Owner reaper: marked query %s as FAILED (owner_lost)", id)
+				qm.notifyWatchers(QueryEvent{
+					QueryID: id,
+					State:   domain.StateFailed,
+					Error:   rec.Error,
+				})
+				telemetry.RecordQueryCompleted(qm.getEngine(rec.DatabaseID), string(domain.StateFailed), 0)
+			}
+		}
+		rCancel()
 	}
 }
 

@@ -166,6 +166,24 @@ func (m *MemoryMetaStore) ListExpiredQueries(ctx context.Context) ([]string, err
 	return expired, nil
 }
 
+func (m *MemoryMetaStore) ListStaleQueries(ctx context.Context) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	now := time.Now()
+	var stale []string
+	for _, q := range m.queries {
+		if q.State != domain.StatePending && q.State != domain.StateRunning {
+			continue
+		}
+		exp, ok := m.instanceKeys[q.OwnerInstanceID]
+		if !ok || now.After(exp) {
+			stale = append(stale, q.ID)
+		}
+	}
+	return stale, nil
+}
+
 func (m *MemoryMetaStore) DeleteQuery(ctx context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

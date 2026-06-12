@@ -9,6 +9,10 @@ import (
 	"dbbridge/internal/core/manager"
 	"dbbridge/internal/lifecycle"
 	"dbbridge/internal/storage"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type QueryService struct {
@@ -24,6 +28,13 @@ func NewQueryService(qm *manager.QueryManager, lm *lifecycle.Manager) *QueryServ
 }
 
 func (s *QueryService) StartQuery(ctx context.Context, dbID string, sql string, opts domain.QueryOptions) (*domain.QueryRecord, error) {
+	ctx, span := otel.Tracer("dbbridge").Start(ctx, "StartQuery",
+		trace.WithAttributes(
+			attribute.String("query.database_id", dbID),
+			attribute.String("query.mode", opts.Mode),
+		))
+	defer span.End()
+
 	if s.lifecycle.IsDraining() {
 		return nil, fmt.Errorf("service is draining: new queries are not accepted")
 	}

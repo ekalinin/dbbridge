@@ -18,6 +18,7 @@ import (
 	"dbbridge/internal/storage"
 	"dbbridge/internal/storage/backends/fs"
 	"dbbridge/internal/storage/backends/s3"
+	"dbbridge/internal/telemetry"
 	"dbbridge/internal/transport/grpcconnect"
 	"dbbridge/internal/transport/rest"
 
@@ -42,6 +43,18 @@ func main() {
 		log.Fatalf("Failed to initialize config manager: %v", err)
 	}
 	cfg := cfgMgr.Get()
+
+	// 1b. Initialize Telemetry (OTLP traces + metrics). Empty endpoint = no-op.
+	otelShutdown, err := telemetry.InitOTel(context.Background(), "dbbridge", cfg.Instance.OTLPEndpoint)
+	if err != nil {
+		log.Printf("WARNING: Failed to initialize OpenTelemetry: %v", err)
+	} else {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = otelShutdown(ctx)
+		}()
+	}
 
 	// 2. Initialize MetaStore
 	var metaStore state.MetaStore

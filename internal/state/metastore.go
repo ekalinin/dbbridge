@@ -58,6 +58,10 @@ type MetaStore interface {
 	// ListExpiredQueries returns IDs of queries whose ResultTTL has expired (based on finished_at + result_ttl).
 	ListExpiredQueries(ctx context.Context) ([]string, error)
 
+	// ListStaleQueries returns IDs of non-terminal (PENDING/RUNNING) queries whose
+	// owner instance is no longer alive (its heartbeat/lease key has expired).
+	ListStaleQueries(ctx context.Context) ([]string, error)
+
 	// DeleteQuery deletes query metadata.
 	DeleteQuery(ctx context.Context, id string) error
 

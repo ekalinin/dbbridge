@@ -239,6 +239,45 @@ func (r *RedisMetaStore) ListExpiredQueries(ctx context.Context) ([]string, erro
 	return expired, nil
 }
 
+func (r *RedisMetaStore) ListStaleQueries(ctx context.Context) ([]string, error) {
+	// Scan all query records; a non-terminal query whose owner instance key has
+	// expired (no heartbeat) is considered stale (owner_lost).
+	var stale []string
+	var cursor uint64
+
+	for {
+		keys, nextCursor, err := r.client.Scan(ctx, cursor, "dbbridge:query:*", 100).Result()
+		if err != nil {
+			return nil, fmt.Errorf("scan queries failed: %w", err)
+		}
+
+		for _, k := range keys {
+			val, err := r.client.Get(ctx, k).Result()
+			if err != nil {
+				continue
+			}
+			var rec domain.QueryRecord
+			if err := json.Unmarshal([]byte(val), &rec); err != nil {
+				continue
+			}
+			if rec.State != domain.StatePending && rec.State != domain.StateRunning {
+				continue
+			}
+			exists, err := r.client.Exists(ctx, instanceKey(rec.OwnerInstanceID)).Result()
+			if err == nil && exists == 0 {
+				stale = append(stale, rec.ID)
+			}
+		}
+
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
+	return stale, nil
+}
+
 func (r *RedisMetaStore) DeleteQuery(ctx context.Context, id string) error {
 	rec, err := r.GetQuery(ctx, id)
 	pipe := r.client.Pipeline()
