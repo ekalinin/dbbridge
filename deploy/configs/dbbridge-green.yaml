@@ -25,4 +25,9 @@ storage:
     access_key_id: "minioadmin"
     secret_access_key: "minioadmin"
 
-databases: []
+databases:
+  - id: dvdrental
+    engine: postgres
+    display_name: "Sample dvdrental DB"
+    dsn: "postgres://postgres:postgres@postgres:5432/dvdrental?sslmode=disable"
+    max_conns: 10
