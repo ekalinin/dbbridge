@@ -56,6 +56,15 @@ func (s *FSResultStore) Reader(ctx context.Context, ref domain.ResultRef) (io.Re
 	return file, nil
 }
 
+func (s *FSResultStore) Stat(ctx context.Context, ref domain.ResultRef) (domain.ResultRef, error) {
+	info, err := os.Stat(ref.Locator)
+	if err != nil {
+		return domain.ResultRef{}, fmt.Errorf("failed to stat results file: %w", err)
+	}
+	ref.SizeBytes = info.Size()
+	return ref, nil
+}
+
 func (s *FSResultStore) Delete(ctx context.Context, ref domain.ResultRef) error {
 	err := os.Remove(ref.Locator)
 	if err != nil && !os.IsNotExist(err) {

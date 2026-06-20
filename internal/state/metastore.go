@@ -55,6 +55,12 @@ type MetaStore interface {
 	// CountInFlight returns the number of active (pending/running) queries owned by an instance.
 	CountInFlight(ctx context.Context, instanceID string) (int, error)
 
+	// ListByInstance returns the IDs of active (non-terminal) queries owned by an instance.
+	ListByInstance(ctx context.Context, instanceID string) ([]string, error)
+
+	// ListDatabasesSeen returns the IDs of databases that have had at least one query submitted.
+	ListDatabasesSeen(ctx context.Context) ([]string, error)
+
 	// ListExpiredQueries returns IDs of queries whose ResultTTL has expired (based on finished_at + result_ttl).
 	ListExpiredQueries(ctx context.Context) ([]string, error)
 

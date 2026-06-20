@@ -145,10 +145,11 @@ func main() {
 		sig := <-sigCh
 		if sig == syscall.SIGHUP {
 			log.Println("Received SIGHUP, reloading configuration...")
-			if err := qm.Reload(); err != nil {
+			if report, err := qm.Reload(); err != nil {
 				log.Printf("ERROR: Failed to reload config: %v", err)
 			} else {
-				log.Println("Configuration reloaded successfully")
+				log.Printf("Configuration reloaded successfully (added=%v removed=%v updated=%v)",
+					report.Added, report.Removed, report.Updated)
 			}
 			continue
 		}

@@ -25,6 +25,8 @@ import (
 var globalResultsDir string
 
 // TestMain registers global singletons once for the whole test binary.
+// It sets up fake database drivers and a temporary directory for file storage
+// that will be used across all end-to-end tests.
 func TestMain(m *testing.M) {
 	// Register fake DB drivers.
 	// "postgres" is used because the config validator only accepts known engine names
@@ -53,12 +55,16 @@ func TestMain(m *testing.M) {
 }
 
 // testHarness wraps the in-process HTTP test server and its URL.
+// It provides a self-contained environment for running end-to-end tests
+// with all components (MetaStore, QueryManager, etc.) isolated per test.
 type testHarness struct {
 	baseURL string
 }
 
 // newHarness creates a fresh in-process server for one test.
 // Each call gets its own MetaStore and QueryManager so tests are isolated.
+// It initializes all necessary components including config, metastore, query manager,
+// and REST server, and returns a test harness with the server's base URL.
 func newHarness(t *testing.T) *testHarness {
 	t.Helper()
 
@@ -121,14 +127,20 @@ databases:
 // ── Fake drivers ─────────────────────────────────────────────────────────────
 
 // fakeDriver opens pools that return two static rows for any SQL.
+// It's used for testing without requiring a real database connection.
 type fakeDriver struct{}
 
+// Open creates a new fake database pool.
 func (fakeDriver) Open(_ context.Context, _ string, _ int) (db.Pool, error) {
 	return fakePool{}, nil
 }
 
+// fakePool implements db.Pool interface for testing purposes.
+// It returns predefined static data for any query.
 type fakePool struct{}
 
+// Exec executes a query and returns a fake row stream with static data.
+// The returned stream contains two rows with columns "id" and "name".
 func (fakePool) Exec(_ context.Context, _ string) (db.RowStream, error) {
 	return &fakeRowStream{
 		cols: []string{"id", "name"},
@@ -140,23 +152,34 @@ func (fakePool) Exec(_ context.Context, _ string) (db.RowStream, error) {
 	}, nil
 }
 
+// Ping simulates a database connectivity check.
 func (fakePool) Ping(_ context.Context) error { return nil }
-func (fakePool) Stat() db.PoolStat            { return db.PoolStat{} }
-func (fakePool) Close() error                 { return nil }
 
+// Stat returns empty pool statistics.
+func (fakePool) Stat() db.PoolStat { return db.PoolStat{} }
+
+// Close closes the pool.
+func (fakePool) Close() error { return nil }
+
+// fakeRowStream implements db.RowStream for testing purposes.
+// It provides a static set of rows for testing query execution.
 type fakeRowStream struct {
 	cols []string
 	rows [][]any
 	pos  int
 }
 
+// Columns returns the column names of the result set.
 func (s *fakeRowStream) Columns() ([]string, error) { return s.cols, nil }
 
+// Next advances to the next row in the result set.
+// Returns true if there are more rows, false otherwise.
 func (s *fakeRowStream) Next() bool {
 	s.pos++
 	return s.pos < len(s.rows)
 }
 
+// Scan copies the values of the current row into the provided destinations.
 func (s *fakeRowStream) Scan(dest ...any) error {
 	row := s.rows[s.pos]
 	for i, d := range dest {
@@ -167,23 +190,37 @@ func (s *fakeRowStream) Scan(dest ...any) error {
 	return nil
 }
 
+// Err returns any error that occurred during iteration.
 func (s *fakeRowStream) Err() error { return nil }
+
+// Close closes the row stream.
 func (s *fakeRowStream) Close() error { return nil }
 
 // slowDriver blocks Exec until its context is canceled (for cancel-query tests).
+// It's used to test query cancellation functionality.
 type slowDriver struct{}
 
+// Open creates a new slow database pool.
 func (slowDriver) Open(_ context.Context, _ string, _ int) (db.Pool, error) {
 	return slowPool{}, nil
 }
 
+// slowPool implements db.Pool interface for testing query cancellation.
+// Its Exec method blocks until the context is canceled.
 type slowPool struct{}
 
+// Exec blocks until the context is canceled, then returns the context error.
+// This is used to test query cancellation functionality.
 func (slowPool) Exec(ctx context.Context, _ string) (db.RowStream, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
 
+// Ping simulates a database connectivity check.
 func (slowPool) Ping(_ context.Context) error { return nil }
-func (slowPool) Stat() db.PoolStat            { return db.PoolStat{} }
-func (slowPool) Close() error                 { return nil }
+
+// Stat returns empty pool statistics.
+func (slowPool) Stat() db.PoolStat { return db.PoolStat{} }
+
+// Close closes the pool.
+func (slowPool) Close() error { return nil }

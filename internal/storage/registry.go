@@ -18,6 +18,10 @@ type ResultStore interface {
 	// Reader opens a reader to fetch previously persisted query results.
 	Reader(ctx context.Context, ref domain.ResultRef) (io.ReadCloser, error)
 
+	// Stat returns metadata (e.g. SizeBytes, RowCount) about a persisted result
+	// without reading its contents.
+	Stat(ctx context.Context, ref domain.ResultRef) (domain.ResultRef, error)
+
 	// Delete removes the persisted query results from the storage backend.
 	Delete(ctx context.Context, ref domain.ResultRef) error
 }

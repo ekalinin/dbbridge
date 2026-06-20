@@ -59,6 +59,41 @@ func TestMemoryMetaStoreQueries(t *testing.T) {
 	}
 }
 
+func TestMemoryMetaStoreListByInstanceAndDatabasesSeen(t *testing.T) {
+	ms := NewMemoryMetaStore()
+	defer ms.Close()
+
+	ctx := t.Context()
+	put := func(id, dbID, owner string, st domain.QueryState) {
+		if err := ms.PutQuery(ctx, &domain.QueryRecord{
+			ID: id, DatabaseID: dbID, OwnerInstanceID: owner, State: st, CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("put %s: %v", id, err)
+		}
+	}
+
+	put("q1", "pg_main", "inst-a", domain.StateRunning)
+	put("q2", "pg_main", "inst-a", domain.StatePending)
+	put("q3", "ch_logs", "inst-a", domain.StateSucceeded) // terminal -> excluded from ListByInstance
+	put("q4", "pg_main", "inst-b", domain.StateRunning)   // owned by another instance
+
+	owned, err := ms.ListByInstance(ctx, "inst-a")
+	if err != nil {
+		t.Fatalf("ListByInstance: %v", err)
+	}
+	if len(owned) != 2 {
+		t.Errorf("ListByInstance(inst-a) = %v, want 2 active queries (q1,q2)", owned)
+	}
+
+	dbs, err := ms.ListDatabasesSeen(ctx)
+	if err != nil {
+		t.Fatalf("ListDatabasesSeen: %v", err)
+	}
+	if len(dbs) != 2 {
+		t.Errorf("ListDatabasesSeen = %v, want 2 distinct (pg_main, ch_logs)", dbs)
+	}
+}
+
 func TestMemoryMetaStoreIdempotency(t *testing.T) {
 	ms := NewMemoryMetaStore()
 	defer ms.Close()

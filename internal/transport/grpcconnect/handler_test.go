@@ -13,6 +13,7 @@ import (
 	"dbbridge/internal/core/service"
 	v1 "dbbridge/internal/gen/api/proto/dbbridge/v1"
 	"dbbridge/internal/gen/api/proto/dbbridge/v1/dbbridgev1connect"
+	"dbbridge/internal/lifecycle"
 	"dbbridge/internal/testutil"
 	"dbbridge/internal/transport/grpcconnect"
 
@@ -117,6 +118,31 @@ func TestConnect_ReloadConfig(t *testing.T) {
 	}
 	if !resp.Msg.Success {
 		t.Errorf("reload success = false: %s", resp.Msg.Message)
+	}
+}
+
+func TestConnect_StartQuery_DrainingUnavailable(t *testing.T) {
+	svc, lm := testutil.NewService(t)
+	h := grpcconnect.NewQueryHandler(svc)
+	mux := http.NewServeMux()
+	path, handler := dbbridgev1connect.NewQueryServiceHandler(h)
+	mux.Handle(path, handler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := dbbridgev1connect.NewQueryServiceClient(srv.Client(), srv.URL)
+
+	lm.SetState(lifecycle.StateDraining)
+
+	_, err := c.StartQuery(context.Background(), connect.NewRequest(&v1.StartQueryRequest{
+		DatabaseId: "testdb",
+		Sql:        "SELECT 1",
+		Options:    &v1.QueryOptions{Mode: "sync"},
+	}))
+	if err == nil {
+		t.Fatal("expected error while draining")
+	}
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Errorf("code = %v, want Unavailable", connect.CodeOf(err))
 	}
 }
 

@@ -229,6 +229,20 @@ func (s *ClickHouseResultStore) Reader(ctx context.Context, ref domain.ResultRef
 	return cr, nil
 }
 
+func (s *ClickHouseResultStore) Stat(ctx context.Context, ref domain.ResultRef) (domain.ResultRef, error) {
+	query := fmt.Sprintf("SELECT count(), sum(length(data)) FROM %s WHERE query_id = ?", s.table)
+	var rowCount int64
+	var byteSize sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, query, ref.Locator).Scan(&rowCount, &byteSize); err != nil {
+		return domain.ResultRef{}, fmt.Errorf("clickhouse stat failed: %w", err)
+	}
+	ref.RowCount = rowCount
+	if byteSize.Valid {
+		ref.SizeBytes = byteSize.Int64
+	}
+	return ref, nil
+}
+
 func (s *ClickHouseResultStore) Delete(ctx context.Context, ref domain.ResultRef) error {
 	query := fmt.Sprintf("ALTER TABLE %s DELETE WHERE query_id = ?", s.table)
 	_, err := s.db.ExecContext(ctx, query, ref.Locator)

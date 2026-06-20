@@ -36,7 +36,7 @@ func (s *QueryService) StartQuery(ctx context.Context, dbID string, sql string, 
 	defer span.End()
 
 	if s.lifecycle.IsDraining() {
-		return nil, fmt.Errorf("service is draining: new queries are not accepted")
+		return nil, domain.DrainingError{}
 	}
 	return s.qm.SubmitQuery(ctx, dbID, sql, opts)
 }
@@ -114,7 +114,7 @@ func (s *QueryService) ListDatabases(ctx context.Context) ([]domain.DatabaseInfo
 	return databases, nil
 }
 
-func (s *QueryService) ReloadConfig(ctx context.Context) error {
+func (s *QueryService) ReloadConfig(ctx context.Context) (domain.ReloadReport, error) {
 	return s.qm.Reload()
 }
 

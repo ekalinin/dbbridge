@@ -3,6 +3,7 @@ package grpcconnect
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -41,6 +42,9 @@ func (h *QueryHandler) StartQuery(ctx context.Context, req *connect.Request[v1.S
 
 	record, err := h.svc.StartQuery(ctx, msg.DatabaseId, msg.Sql, opts)
 	if err != nil {
+		if _, ok := errors.AsType[domain.DrainingError](err); ok {
+			return nil, connect.NewError(connect.CodeUnavailable, err)
+		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 
@@ -135,7 +139,7 @@ func (h *QueryHandler) ListDatabases(ctx context.Context, req *connect.Request[v
 }
 
 func (h *QueryHandler) ReloadConfig(ctx context.Context, req *connect.Request[v1.ReloadConfigRequest]) (*connect.Response[v1.ReloadConfigResponse], error) {
-	err := h.svc.ReloadConfig(ctx)
+	report, err := h.svc.ReloadConfig(ctx)
 	if err != nil {
 		return connect.NewResponse(&v1.ReloadConfigResponse{
 			Success: false,
@@ -145,7 +149,8 @@ func (h *QueryHandler) ReloadConfig(ctx context.Context, req *connect.Request[v1
 
 	return connect.NewResponse(&v1.ReloadConfigResponse{
 		Success: true,
-		Message: "Config reloaded successfully",
+		Message: fmt.Sprintf("Config reloaded successfully (added=%d removed=%d updated=%d)",
+			len(report.Added), len(report.Removed), len(report.Updated)),
 	}), nil
 }
 

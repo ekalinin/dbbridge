@@ -146,6 +146,35 @@ func (m *MemoryMetaStore) CountInFlight(ctx context.Context, instanceID string) 
 	return count, nil
 }
 
+func (m *MemoryMetaStore) ListByInstance(ctx context.Context, instanceID string) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var ids []string
+	for _, q := range m.queries {
+		if q.OwnerInstanceID == instanceID && !q.State.IsTerminal() {
+			ids = append(ids, q.ID)
+		}
+	}
+	return ids, nil
+}
+
+func (m *MemoryMetaStore) ListDatabasesSeen(ctx context.Context) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	seen := make(map[string]struct{})
+	var dbs []string
+	for _, q := range m.queries {
+		if _, ok := seen[q.DatabaseID]; ok {
+			continue
+		}
+		seen[q.DatabaseID] = struct{}{}
+		dbs = append(dbs, q.DatabaseID)
+	}
+	return dbs, nil
+}
+
 func (m *MemoryMetaStore) ListExpiredQueries(ctx context.Context) ([]string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,9 +37,18 @@ func TestHandler_ServesMetrics(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
-	buf := make([]byte, 4096)
-	n, _ := resp.Body.Read(buf)
-	if !strings.Contains(string(buf[:n]), "go_") {
-		t.Error("expected Go runtime metrics in output")
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	out := string(body)
+
+	if !strings.Contains(out, "go_goroutines") {
+		t.Error("expected baseline Go runtime metrics (go_goroutines) in output")
+	}
+	// go_sched_latencies_seconds is only exposed by a GoCollector backed by the
+	// full runtime/metrics ruleset, not the legacy default collector (spec §10).
+	if !strings.Contains(out, "go_sched_latencies_seconds") {
+		t.Error("expected runtime/metrics-backed metric (go_sched_latencies_seconds) in output")
 	}
 }

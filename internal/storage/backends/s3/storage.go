@@ -111,6 +111,20 @@ func (s *S3ResultStore) Reader(ctx context.Context, ref domain.ResultRef) (io.Re
 	return output.Body, nil
 }
 
+func (s *S3ResultStore) Stat(ctx context.Context, ref domain.ResultRef) (domain.ResultRef, error) {
+	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(ref.Locator),
+	})
+	if err != nil {
+		return domain.ResultRef{}, fmt.Errorf("s3 head object failed: %w", err)
+	}
+	if out.ContentLength != nil {
+		ref.SizeBytes = *out.ContentLength
+	}
+	return ref, nil
+}
+
 func (s *S3ResultStore) Delete(ctx context.Context, ref domain.ResultRef) error {
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),

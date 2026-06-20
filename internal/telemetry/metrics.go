@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -50,8 +51,6 @@ var (
 
 	// DBPoolStats tracks connection pool utilization per database.
 	// Labels: db_id, stat (open|idle|in_use).
-	// Go runtime metrics (go_goroutines, go_gc_duration_seconds, etc.) are exported
-	// automatically by the default Prometheus registry via NewGoCollector.
 	DBPoolStats = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "dbbridge_db_pool_stats",
@@ -62,6 +61,16 @@ var (
 )
 
 func init() {
+	// Spec §10: export Go runtime metrics via the runtime/metrics package.
+	// The default registry pre-registers a legacy (MemStats-based) Go collector;
+	// replace it with one backed by the full runtime/metrics ruleset.
+	prometheus.Unregister(collectors.NewGoCollector())
+	prometheus.MustRegister(collectors.NewGoCollector(
+		collectors.WithGoCollectorRuntimeMetrics(
+			collectors.MetricsAll,
+		),
+	))
+
 	prometheus.MustRegister(QueriesTotal)
 	prometheus.MustRegister(QueryDuration)
 	prometheus.MustRegister(InflightQueries)

@@ -91,6 +91,20 @@ databases:
 	return qm, ms
 }
 
+func TestReloadReport(t *testing.T) {
+	qm, _ := newManager(t)
+
+	report, err := qm.Reload()
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	// The config file is unchanged between initial load and reload, so the diff
+	// must be empty across all three buckets.
+	if len(report.Added) != 0 || len(report.Removed) != 0 || len(report.Updated) != 0 {
+		t.Errorf("expected empty reload report on unchanged config, got %+v", report)
+	}
+}
+
 func pollState(t *testing.T, qm *QueryManager, id string, want domain.QueryState, deadline time.Duration) *domain.QueryRecord {
 	t.Helper()
 	end := time.Now().Add(deadline)

@@ -43,6 +43,8 @@ func instanceQueriesKey(id string) string {
 
 const controlChannel = "dbbridge:control:channel"
 
+const databasesSeenKey = "dbbridge:databases:seen"
+
 func (r *RedisMetaStore) PutQuery(ctx context.Context, record *domain.QueryRecord) error {
 	data, err := json.Marshal(record)
 	if err != nil {
@@ -60,6 +62,11 @@ func (r *RedisMetaStore) PutQuery(ctx context.Context, record *domain.QueryRecor
 
 	pipe := r.client.Pipeline()
 	pipe.Set(ctx, key, data, expiration)
+
+	// Track every database that has been queried (for ListDatabasesSeen).
+	if record.DatabaseID != "" {
+		pipe.SAdd(ctx, databasesSeenKey, record.DatabaseID)
+	}
 
 	// If the query is active, add it to instance owned set
 	if !record.State.IsTerminal() {
@@ -191,6 +198,22 @@ func (r *RedisMetaStore) CountInFlight(ctx context.Context, instanceID string) (
 		return 0, fmt.Errorf("failed to get active query count from redis: %w", err)
 	}
 	return int(card), nil
+}
+
+func (r *RedisMetaStore) ListByInstance(ctx context.Context, instanceID string) ([]string, error) {
+	ids, err := r.client.SMembers(ctx, instanceQueriesKey(instanceID)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list queries by instance from redis: %w", err)
+	}
+	return ids, nil
+}
+
+func (r *RedisMetaStore) ListDatabasesSeen(ctx context.Context) ([]string, error) {
+	ids, err := r.client.SMembers(ctx, databasesSeenKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list databases seen from redis: %w", err)
+	}
+	return ids, nil
 }
 
 func (r *RedisMetaStore) ListExpiredQueries(ctx context.Context) ([]string, error) {

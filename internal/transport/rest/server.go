@@ -2,6 +2,7 @@ package rest
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -122,6 +123,10 @@ func (s *Server) handleStartQuery(w http.ResponseWriter, r *http.Request) {
 
 	record, err := s.svc.StartQuery(r.Context(), payload.DatabaseID, payload.SQL, opts)
 	if err != nil {
+		if _, ok := errors.AsType[domain.DrainingError](err); ok {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "failed to start query: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -307,7 +312,7 @@ func (s *Server) handleListDatabases(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
-	err := s.svc.ReloadConfig(r.Context())
+	report, err := s.svc.ReloadConfig(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -322,6 +327,7 @@ func (s *Server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"success": true,
 		"message": "Config reloaded successfully",
+		"report":  report,
 	})
 }
 

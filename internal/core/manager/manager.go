@@ -109,11 +109,33 @@ func (qm *QueryManager) syncPools() error {
 }
 
 // Reload reloads the configuration and updates DB connection pools dynamically.
-func (qm *QueryManager) Reload() error {
+// It returns a ReloadReport summarizing which databases were added/removed/updated.
+func (qm *QueryManager) Reload() (domain.ReloadReport, error) {
+	oldCfg := qm.cfgManager.Get()
 	if err := qm.cfgManager.Reload(); err != nil {
-		return err
+		return domain.ReloadReport{}, err
 	}
-	return qm.syncPools()
+	newCfg := qm.cfgManager.Get()
+
+	diff := config.DiffDatabases(oldCfg, newCfg)
+	report := domain.ReloadReport{
+		Added:   dbIDs(diff.Added),
+		Removed: dbIDs(diff.Removed),
+		Updated: dbIDs(diff.Updated),
+	}
+
+	if err := qm.syncPools(); err != nil {
+		return report, err
+	}
+	return report, nil
+}
+
+func dbIDs(dbs []config.DatabaseConfig) []string {
+	ids := make([]string, len(dbs))
+	for i, d := range dbs {
+		ids[i] = d.ID
+	}
+	return ids
 }
 
 func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string, opts domain.QueryOptions) (*domain.QueryRecord, error) {
