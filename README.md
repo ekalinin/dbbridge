@@ -1,6 +1,6 @@
 # dbbridge
 
-A stateless SQL proxy that accepts a query, executes it asynchronously against the target database, streams the result to persistent storage, and serves downloads on demand. Consumers get a `query_id` immediately and poll or subscribe for completion — disconnecting the consumer never cancels the query.
+An asynchronous SQL proxy that accepts a query, executes it in the background against the target database, streams the result to shared storage, and serves downloads on demand. Consumers get a `query_id` immediately and poll or subscribe for completion — disconnecting the consumer never cancels the query.
 
 ## Key properties
 
