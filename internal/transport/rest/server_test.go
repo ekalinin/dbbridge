@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"dbbridge/internal/lifecycle"
-	"dbbridge/internal/testutil"
-	"dbbridge/internal/transport/rest"
+	"github.com/ekalinin/dbbridge/internal/lifecycle"
+	"github.com/ekalinin/dbbridge/internal/testutil"
+	"github.com/ekalinin/dbbridge/internal/transport/rest"
 )
 
 func TestREST_StartQuery_DrainingReturns503(t *testing.T) {

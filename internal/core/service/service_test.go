@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"dbbridge/internal/core/domain"
-	"dbbridge/internal/lifecycle"
-	"dbbridge/internal/testutil"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/lifecycle"
+	"github.com/ekalinin/dbbridge/internal/testutil"
 )
 
 func TestStartQuery_DrainingRejected(t *testing.T) {

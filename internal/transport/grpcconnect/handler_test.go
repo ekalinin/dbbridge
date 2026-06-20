@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"dbbridge/internal/core/service"
-	v1 "dbbridge/internal/gen/api/proto/dbbridge/v1"
-	"dbbridge/internal/gen/api/proto/dbbridge/v1/dbbridgev1connect"
-	"dbbridge/internal/lifecycle"
-	"dbbridge/internal/testutil"
-	"dbbridge/internal/transport/grpcconnect"
+	"github.com/ekalinin/dbbridge/internal/core/service"
+	v1 "github.com/ekalinin/dbbridge/internal/gen/api/proto/dbbridge/v1"
+	"github.com/ekalinin/dbbridge/internal/gen/api/proto/dbbridge/v1/dbbridgev1connect"
+	"github.com/ekalinin/dbbridge/internal/lifecycle"
+	"github.com/ekalinin/dbbridge/internal/testutil"
+	"github.com/ekalinin/dbbridge/internal/transport/grpcconnect"
 
 	"connectrpc.com/connect"
 )

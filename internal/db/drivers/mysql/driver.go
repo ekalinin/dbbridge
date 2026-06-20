@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"dbbridge/internal/db"
+	"github.com/ekalinin/dbbridge/internal/db"
 
 	_ "github.com/go-sql-driver/mysql"
 )

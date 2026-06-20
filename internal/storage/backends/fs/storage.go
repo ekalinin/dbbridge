@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
 )
 
 func init() {

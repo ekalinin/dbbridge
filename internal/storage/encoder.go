@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"dbbridge/internal/db"
+	"github.com/ekalinin/dbbridge/internal/db"
 )
 
 // CountingWriter wraps an io.Writer and tracks the number of bytes written.

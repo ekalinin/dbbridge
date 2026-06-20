@@ -1,4 +1,4 @@
-module dbbridge
+module github.com/ekalinin/dbbridge
 
 go 1.26.0
 

@@ -10,25 +10,25 @@ import (
 	"syscall"
 	"time"
 
-	"dbbridge/internal/config"
-	"dbbridge/internal/core/manager"
-	"dbbridge/internal/core/service"
-	"dbbridge/internal/lifecycle"
-	"dbbridge/internal/state"
-	"dbbridge/internal/storage"
-	"dbbridge/internal/storage/backends/fs"
-	"dbbridge/internal/storage/backends/s3"
-	"dbbridge/internal/telemetry"
-	"dbbridge/internal/transport/grpcconnect"
-	"dbbridge/internal/transport/rest"
+	"github.com/ekalinin/dbbridge/internal/config"
+	"github.com/ekalinin/dbbridge/internal/core/manager"
+	"github.com/ekalinin/dbbridge/internal/core/service"
+	"github.com/ekalinin/dbbridge/internal/lifecycle"
+	"github.com/ekalinin/dbbridge/internal/state"
+	"github.com/ekalinin/dbbridge/internal/storage"
+	"github.com/ekalinin/dbbridge/internal/storage/backends/fs"
+	"github.com/ekalinin/dbbridge/internal/storage/backends/s3"
+	"github.com/ekalinin/dbbridge/internal/telemetry"
+	"github.com/ekalinin/dbbridge/internal/transport/grpcconnect"
+	"github.com/ekalinin/dbbridge/internal/transport/rest"
 
-	v1connect "dbbridge/internal/gen/api/proto/dbbridge/v1/dbbridgev1connect"
+	v1connect "github.com/ekalinin/dbbridge/internal/gen/api/proto/dbbridge/v1/dbbridgev1connect"
 
 	// Register drivers statically
-	_ "dbbridge/internal/db/drivers/clickhouse"
-	_ "dbbridge/internal/db/drivers/mysql"
-	_ "dbbridge/internal/db/drivers/oracle"
-	_ "dbbridge/internal/db/drivers/postgres"
+	_ "github.com/ekalinin/dbbridge/internal/db/drivers/clickhouse"
+	_ "github.com/ekalinin/dbbridge/internal/db/drivers/mysql"
+	_ "github.com/ekalinin/dbbridge/internal/db/drivers/oracle"
+	_ "github.com/ekalinin/dbbridge/internal/db/drivers/postgres"
 )
 
 func main() {

@@ -8,7 +8,7 @@ import (
 	"io"
 	"sync"
 
-	"dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2"
 )

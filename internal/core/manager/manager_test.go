@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"dbbridge/internal/config"
-	"dbbridge/internal/core/domain"
-	"dbbridge/internal/db"
-	"dbbridge/internal/state"
-	"dbbridge/internal/storage"
-	"dbbridge/internal/storage/backends/fs"
+	"github.com/ekalinin/dbbridge/internal/config"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/db"
+	"github.com/ekalinin/dbbridge/internal/state"
+	"github.com/ekalinin/dbbridge/internal/storage"
+	"github.com/ekalinin/dbbridge/internal/storage/backends/fs"
 )
 
 var resultsDir string

@@ -6,7 +6,7 @@ import (
 	"log"
 	"net/http"
 
-	"dbbridge/internal/core/service"
+	"github.com/ekalinin/dbbridge/internal/core/service"
 
 	"github.com/coder/websocket"
 )

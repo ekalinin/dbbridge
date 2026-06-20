@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"dbbridge/internal/core/domain"
-	"dbbridge/internal/core/service"
-	"dbbridge/internal/telemetry"
-	"dbbridge/internal/transport/ws"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/core/service"
+	"github.com/ekalinin/dbbridge/internal/telemetry"
+	"github.com/ekalinin/dbbridge/internal/transport/ws"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"

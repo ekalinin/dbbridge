@@ -6,7 +6,7 @@ import (
 	"io"
 	"sync"
 
-	"dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"

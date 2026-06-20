@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"io"
 
-	"dbbridge/internal/core/domain"
-	"dbbridge/internal/core/manager"
-	"dbbridge/internal/lifecycle"
-	"dbbridge/internal/storage"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/core/manager"
+	"github.com/ekalinin/dbbridge/internal/lifecycle"
+	"github.com/ekalinin/dbbridge/internal/storage"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"

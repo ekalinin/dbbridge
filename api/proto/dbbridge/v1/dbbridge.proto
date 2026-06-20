@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package dbbridge.v1;
 
-option go_package = "dbbridge/internal/gen/api/proto/dbbridge/v1;dbbridgev1";
+option go_package = "github.com/ekalinin/dbbridge/internal/gen/api/proto/dbbridge/v1;dbbridgev1";
 
 service QueryService {
   rpc StartQuery(StartQueryRequest) returns (StartQueryResponse);

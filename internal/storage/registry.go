@@ -6,7 +6,7 @@ import (
 	"io"
 	"sync"
 
-	"dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
 )
 
 // ResultStore defines the interface for persisting and retrieving large query execution results.

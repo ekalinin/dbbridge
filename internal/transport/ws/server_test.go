@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"dbbridge/internal/core/domain"
-	"dbbridge/internal/testutil"
-	"dbbridge/internal/transport/ws"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/testutil"
+	"github.com/ekalinin/dbbridge/internal/transport/ws"
 
 	"github.com/coder/websocket"
 )

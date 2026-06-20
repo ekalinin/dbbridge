@@ -10,15 +10,15 @@ import (
 	"os"
 	"testing"
 
-	"dbbridge/internal/config"
-	"dbbridge/internal/core/manager"
-	"dbbridge/internal/core/service"
-	"dbbridge/internal/db"
-	"dbbridge/internal/lifecycle"
-	"dbbridge/internal/state"
-	"dbbridge/internal/storage"
-	"dbbridge/internal/storage/backends/fs"
-	"dbbridge/internal/transport/rest"
+	"github.com/ekalinin/dbbridge/internal/config"
+	"github.com/ekalinin/dbbridge/internal/core/manager"
+	"github.com/ekalinin/dbbridge/internal/core/service"
+	"github.com/ekalinin/dbbridge/internal/db"
+	"github.com/ekalinin/dbbridge/internal/lifecycle"
+	"github.com/ekalinin/dbbridge/internal/state"
+	"github.com/ekalinin/dbbridge/internal/storage"
+	"github.com/ekalinin/dbbridge/internal/storage/backends/fs"
+	"github.com/ekalinin/dbbridge/internal/transport/rest"
 )
 
 // process-wide temp dir for FS result storage — shared across all tests.

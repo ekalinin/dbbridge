@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
 )
 
 func TestMemoryMetaStoreQueries(t *testing.T) {

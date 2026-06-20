@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
 )
 
 var (

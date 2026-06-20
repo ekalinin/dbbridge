@@ -7,10 +7,10 @@ import (
 	"io"
 	"time"
 
-	"dbbridge/internal/core/domain"
-	"dbbridge/internal/core/service"
-	v1 "dbbridge/internal/gen/api/proto/dbbridge/v1"
-	"dbbridge/internal/gen/api/proto/dbbridge/v1/dbbridgev1connect"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/core/service"
+	v1 "github.com/ekalinin/dbbridge/internal/gen/api/proto/dbbridge/v1"
+	"github.com/ekalinin/dbbridge/internal/gen/api/proto/dbbridge/v1/dbbridgev1connect"
 
 	"connectrpc.com/connect"
 )

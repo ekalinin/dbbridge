@@ -11,14 +11,14 @@ import (
 	"sync"
 	"testing"
 
-	"dbbridge/internal/config"
-	"dbbridge/internal/core/manager"
-	"dbbridge/internal/core/service"
-	"dbbridge/internal/db"
-	"dbbridge/internal/lifecycle"
-	"dbbridge/internal/state"
-	"dbbridge/internal/storage"
-	"dbbridge/internal/storage/backends/fs"
+	"github.com/ekalinin/dbbridge/internal/config"
+	"github.com/ekalinin/dbbridge/internal/core/manager"
+	"github.com/ekalinin/dbbridge/internal/core/service"
+	"github.com/ekalinin/dbbridge/internal/db"
+	"github.com/ekalinin/dbbridge/internal/lifecycle"
+	"github.com/ekalinin/dbbridge/internal/state"
+	"github.com/ekalinin/dbbridge/internal/storage"
+	"github.com/ekalinin/dbbridge/internal/storage/backends/fs"
 )
 
 var (

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
 
 	"github.com/redis/go-redis/v9"
 )

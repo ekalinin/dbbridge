@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"dbbridge/internal/db"
+	"github.com/ekalinin/dbbridge/internal/db"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"

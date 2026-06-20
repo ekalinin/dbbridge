@@ -7,8 +7,8 @@ package dbbridgev1connect
 import (
 	connect "connectrpc.com/connect"
 	context "context"
-	v1 "dbbridge/internal/gen/api/proto/dbbridge/v1"
 	errors "errors"
+	v1 "github.com/ekalinin/dbbridge/internal/gen/api/proto/dbbridge/v1"
 	http "net/http"
 	strings "strings"
 )

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/core/domain"
 )
 
 type MemoryMetaStore struct {
