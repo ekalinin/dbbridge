@@ -19,6 +19,22 @@ A stateless SQL proxy that accepts a query, executes it asynchronously against t
 | MetaStore | Redis (multi-node), in-memory (single-node) |
 | Result formats | JSONL (default), CSV, Parquet |
 
+## Installation
+
+Install the binary with Go:
+
+```bash
+go install github.com/ekalinin/dbbridge/cmd/dbbridge@latest
+```
+
+This installs `dbbridge` into `$(go env GOPATH)/bin`. Run it against a config file:
+
+```bash
+dbbridge -config configs/dbbridge.yaml
+```
+
+To build from source instead, see [Development](#development).
+
 ## Quick start
 
 ```bash
@@ -138,3 +154,7 @@ deploy/             Dockerfile, docker-compose, k8s manifests
 - go-ora
 - aws-sdk-go-v2
 - OpenTelemetry
+
+## License
+
+[MIT](LICENSE) © Eugene Kalinin

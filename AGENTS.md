@@ -42,7 +42,7 @@ make can-stop                 # GET  /v1/admin/can-stop
 
 ## Architecture
 
-dbbridge is a **stateless SQL proxy** that accepts queries over REST or gRPC-Connect, executes them asynchronously against target databases, streams and persists the results to a storage backend, then serves downloads on demand. Multiple instances coordinate via Redis.
+dbbridge is a **stateless SQL proxy** that accepts queries over REST (including WebSocket) or gRPC-Connect, executes them asynchronously against target databases, streams and persists the results to a storage backend, then serves downloads on demand. Multiple instances coordinate via Redis.
 
 ### Request flow
 
