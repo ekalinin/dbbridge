@@ -127,7 +127,7 @@ The API contract is defined spec-first: a single proto file `api/proto/dbbridge/
   - `GET /v1/databases`.
   - `POST /v1/admin/reload`.
   - `GET /v1/admin/can-stop` → `{can_be_stopped, in_flight}` for orchestrator.
-  - `GET /healthz`, `GET /readyz`, `GET /metrics`.
+  - `GET /healthz` (liveness, always 200), `GET /readyz` (readiness — 503 while draining, see §9), `GET /metrics`.
 - **WebSocket** (`coder/websocket`, `/v1/ws`): subscription to `QueryEvent` (state changes, progress) via `QueryService.Watch`.
 
 All adapters are without business logic, only mapping DTO↔domain.
@@ -166,6 +166,7 @@ databases:
 
 - Instance states: `SERVING` → `DRAINING` → `STOPPABLE`. On SIGTERM → `DRAINING`: new `StartQuery` requests are rejected (503), `CanIBeStopped` starts depending on `CountInFlight`.
 - `CanIBeStopped` (REST + gRPC): `true` ⟺ in-flight owned queries = 0 (I5). Orchestrator polls before stopping the blue instance.
+- **Readiness gating via `/readyz`:** `GET /readyz` returns `200` while `SERVING` and `503` while `DRAINING`, so the LB / Kubernetes readiness probe takes the node out of rotation and stops routing new traffic the moment draining begins (in-flight owned queries keep running to completion). This is complementary to `CanIBeStopped`, not redundant: `/readyz` gates *incoming traffic*, whereas `CanIBeStopped` / `GET /v1/admin/can-stop` signals when the node has fully quiesced and is *safe to terminate* (0 in-flight, I5). `GET /healthz` is a pure liveness check (always `200`) and must not depend on external systems.
 - Two instances (`dbbridge-blue`/`dbbridge-green`) behind LB, shared Redis + storage; reads are served by any instance, drain is done one by one.
 
 ## 10. Telemetry (`internal/telemetry`)
