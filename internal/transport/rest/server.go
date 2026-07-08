@@ -71,13 +71,16 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	// Simple readiness: verify service is loaded
-	if s.svc != nil {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("READY"))
+	// Report not-ready when the service isn't wired or the instance is draining,
+	// so the load balancer / k8s readiness probe removes this node from rotation
+	// and stops routing new traffic while in-flight queries finish.
+	if s.svc == nil || s.svc.IsDraining() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("NOT READY"))
 		return
 	}
-	w.WriteHeader(http.StatusServiceUnavailable)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("READY"))
 }
 
 type StartQueryPayload struct {

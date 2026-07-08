@@ -123,6 +123,12 @@ func (s *QueryService) CanIBeStopped(ctx context.Context) (bool, int) {
 	return inFlight == 0, inFlight
 }
 
+// IsDraining reports whether the instance is draining. The readiness probe uses
+// it to take this node out of the load balancer rotation during graceful drain.
+func (s *QueryService) IsDraining() bool {
+	return s.lifecycle.IsDraining()
+}
+
 func (s *QueryService) WatchQuery(ctx context.Context, queryID string) (<-chan manager.QueryEvent, error) {
 	return s.qm.Watch(ctx, queryID)
 }
