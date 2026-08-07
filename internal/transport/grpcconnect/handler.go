@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"time"
 
 	"github.com/ekalinin/dbbridge/internal/core/domain"
 	"github.com/ekalinin/dbbridge/internal/core/service"
-	v1 "github.com/ekalinin/dbbridge/internal/gen/api/proto/dbbridge/v1"
-	"github.com/ekalinin/dbbridge/internal/gen/api/proto/dbbridge/v1/dbbridgev1connect"
+	v1 "github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1"
+	"github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1/dbbridgev1connect"
 
 	"connectrpc.com/connect"
 )
@@ -42,8 +43,8 @@ func (h *QueryHandler) StartQuery(ctx context.Context, req *connect.Request[v1.S
 
 	record, err := h.svc.StartQuery(ctx, msg.DatabaseId, msg.Sql, opts)
 	if err != nil {
-		if _, ok := errors.AsType[domain.DrainingError](err); ok {
-			return nil, connect.NewError(connect.CodeUnavailable, err)
+		if drainErr, ok := errors.AsType[domain.DrainingError](err); ok {
+			return nil, connect.NewError(connect.CodeUnavailable, drainErr)
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -92,7 +93,11 @@ func (h *QueryHandler) DownloadResult(ctx context.Context, req *connect.Request[
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
-	defer reader.Close()
+	defer func() {
+		if cerr := reader.Close(); cerr != nil {
+			log.Printf("ERROR: failed to close result reader: %v", cerr)
+		}
+	}()
 
 	// Stream in 64KB chunks
 	buf := make([]byte, 64*1024)

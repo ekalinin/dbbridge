@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/ekalinin/dbbridge/internal/core/domain"
@@ -144,7 +145,9 @@ func (r *RedisMetaStore) Heartbeat(ctx context.Context, instanceID string, owned
 		rec, err := r.GetQuery(ctx, id)
 		if err == nil {
 			rec.LeaseDeadline = deadline
-			_ = r.UpdateQuery(ctx, rec)
+			if uerr := r.UpdateQuery(ctx, rec); uerr != nil {
+				log.Printf("ERROR: failed to refresh lease for query %s: %v", id, uerr)
+			}
 		}
 	}
 
@@ -169,7 +172,11 @@ func (r *RedisMetaStore) SubscribeControl(ctx context.Context) (<-chan ControlMs
 	ch := make(chan ControlMsg, 100)
 
 	go func() {
-		defer pubsub.Close()
+		defer func() {
+			if cerr := pubsub.Close(); cerr != nil {
+				log.Printf("ERROR: failed to close control subscription: %v", cerr)
+			}
+		}()
 		defer close(ch)
 
 		redisCh := pubsub.Channel()

@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        (unknown)
-// source: api/proto/dbbridge/v1/dbbridge.proto
+// source: dbbridge/v1/dbbridge.proto
 
 package dbbridgev1
 
@@ -66,11 +66,11 @@ func (x QueryState) String() string {
 }
 
 func (QueryState) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_enumTypes[0].Descriptor()
+	return file_dbbridge_v1_dbbridge_proto_enumTypes[0].Descriptor()
 }
 
 func (QueryState) Type() protoreflect.EnumType {
-	return &file_api_proto_dbbridge_v1_dbbridge_proto_enumTypes[0]
+	return &file_dbbridge_v1_dbbridge_proto_enumTypes[0]
 }
 
 func (x QueryState) Number() protoreflect.EnumNumber {
@@ -79,7 +79,7 @@ func (x QueryState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use QueryState.Descriptor instead.
 func (QueryState) EnumDescriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{0}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{0}
 }
 
 type QueryOptions struct {
@@ -96,7 +96,7 @@ type QueryOptions struct {
 
 func (x *QueryOptions) Reset() {
 	*x = QueryOptions{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[0]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -108,7 +108,7 @@ func (x *QueryOptions) String() string {
 func (*QueryOptions) ProtoMessage() {}
 
 func (x *QueryOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[0]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -121,7 +121,7 @@ func (x *QueryOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryOptions.ProtoReflect.Descriptor instead.
 func (*QueryOptions) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{0}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *QueryOptions) GetTimeoutMs() int64 {
@@ -177,7 +177,7 @@ type QueryError struct {
 
 func (x *QueryError) Reset() {
 	*x = QueryError{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[1]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -189,7 +189,7 @@ func (x *QueryError) String() string {
 func (*QueryError) ProtoMessage() {}
 
 func (x *QueryError) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[1]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -202,7 +202,7 @@ func (x *QueryError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryError.ProtoReflect.Descriptor instead.
 func (*QueryError) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{1}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *QueryError) GetCode() string {
@@ -240,7 +240,7 @@ type QueryStats struct {
 
 func (x *QueryStats) Reset() {
 	*x = QueryStats{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[2]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -252,7 +252,7 @@ func (x *QueryStats) String() string {
 func (*QueryStats) ProtoMessage() {}
 
 func (x *QueryStats) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[2]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -265,7 +265,7 @@ func (x *QueryStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryStats.ProtoReflect.Descriptor instead.
 func (*QueryStats) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{2}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *QueryStats) GetRowsRead() int64 {
@@ -324,7 +324,7 @@ type ResultRef struct {
 
 func (x *ResultRef) Reset() {
 	*x = ResultRef{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[3]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -336,7 +336,7 @@ func (x *ResultRef) String() string {
 func (*ResultRef) ProtoMessage() {}
 
 func (x *ResultRef) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[3]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -349,7 +349,7 @@ func (x *ResultRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResultRef.ProtoReflect.Descriptor instead.
 func (*ResultRef) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{3}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ResultRef) GetBackend() string {
@@ -416,7 +416,7 @@ type QueryRecord struct {
 
 func (x *QueryRecord) Reset() {
 	*x = QueryRecord{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[4]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -428,7 +428,7 @@ func (x *QueryRecord) String() string {
 func (*QueryRecord) ProtoMessage() {}
 
 func (x *QueryRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[4]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -441,7 +441,7 @@ func (x *QueryRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryRecord.ProtoReflect.Descriptor instead.
 func (*QueryRecord) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{4}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *QueryRecord) GetId() string {
@@ -554,7 +554,7 @@ type DatabaseInfo struct {
 
 func (x *DatabaseInfo) Reset() {
 	*x = DatabaseInfo{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[5]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -566,7 +566,7 @@ func (x *DatabaseInfo) String() string {
 func (*DatabaseInfo) ProtoMessage() {}
 
 func (x *DatabaseInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[5]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -579,7 +579,7 @@ func (x *DatabaseInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DatabaseInfo.ProtoReflect.Descriptor instead.
 func (*DatabaseInfo) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{5}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *DatabaseInfo) GetId() string {
@@ -621,7 +621,7 @@ type StartQueryRequest struct {
 
 func (x *StartQueryRequest) Reset() {
 	*x = StartQueryRequest{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[6]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -633,7 +633,7 @@ func (x *StartQueryRequest) String() string {
 func (*StartQueryRequest) ProtoMessage() {}
 
 func (x *StartQueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[6]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -646,7 +646,7 @@ func (x *StartQueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartQueryRequest.ProtoReflect.Descriptor instead.
 func (*StartQueryRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{6}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *StartQueryRequest) GetDatabaseId() string {
@@ -679,7 +679,7 @@ type StartQueryResponse struct {
 
 func (x *StartQueryResponse) Reset() {
 	*x = StartQueryResponse{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[7]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -691,7 +691,7 @@ func (x *StartQueryResponse) String() string {
 func (*StartQueryResponse) ProtoMessage() {}
 
 func (x *StartQueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[7]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -704,7 +704,7 @@ func (x *StartQueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartQueryResponse.ProtoReflect.Descriptor instead.
 func (*StartQueryResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{7}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StartQueryResponse) GetRecord() *QueryRecord {
@@ -723,7 +723,7 @@ type GetQueryStatusRequest struct {
 
 func (x *GetQueryStatusRequest) Reset() {
 	*x = GetQueryStatusRequest{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[8]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -735,7 +735,7 @@ func (x *GetQueryStatusRequest) String() string {
 func (*GetQueryStatusRequest) ProtoMessage() {}
 
 func (x *GetQueryStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[8]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -748,7 +748,7 @@ func (x *GetQueryStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetQueryStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetQueryStatusRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{8}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetQueryStatusRequest) GetQueryId() string {
@@ -767,7 +767,7 @@ type GetQueryStatusResponse struct {
 
 func (x *GetQueryStatusResponse) Reset() {
 	*x = GetQueryStatusResponse{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[9]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -779,7 +779,7 @@ func (x *GetQueryStatusResponse) String() string {
 func (*GetQueryStatusResponse) ProtoMessage() {}
 
 func (x *GetQueryStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[9]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -792,7 +792,7 @@ func (x *GetQueryStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetQueryStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetQueryStatusResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{9}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetQueryStatusResponse) GetRecord() *QueryRecord {
@@ -811,7 +811,7 @@ type StopQueryRequest struct {
 
 func (x *StopQueryRequest) Reset() {
 	*x = StopQueryRequest{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[10]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -823,7 +823,7 @@ func (x *StopQueryRequest) String() string {
 func (*StopQueryRequest) ProtoMessage() {}
 
 func (x *StopQueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[10]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -836,7 +836,7 @@ func (x *StopQueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopQueryRequest.ProtoReflect.Descriptor instead.
 func (*StopQueryRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{10}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *StopQueryRequest) GetQueryId() string {
@@ -856,7 +856,7 @@ type StopQueryResponse struct {
 
 func (x *StopQueryResponse) Reset() {
 	*x = StopQueryResponse{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[11]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -868,7 +868,7 @@ func (x *StopQueryResponse) String() string {
 func (*StopQueryResponse) ProtoMessage() {}
 
 func (x *StopQueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[11]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -881,7 +881,7 @@ func (x *StopQueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopQueryResponse.ProtoReflect.Descriptor instead.
 func (*StopQueryResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{11}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *StopQueryResponse) GetQueryId() string {
@@ -907,7 +907,7 @@ type GetQueryStatsRequest struct {
 
 func (x *GetQueryStatsRequest) Reset() {
 	*x = GetQueryStatsRequest{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[12]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -919,7 +919,7 @@ func (x *GetQueryStatsRequest) String() string {
 func (*GetQueryStatsRequest) ProtoMessage() {}
 
 func (x *GetQueryStatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[12]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -932,7 +932,7 @@ func (x *GetQueryStatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetQueryStatsRequest.ProtoReflect.Descriptor instead.
 func (*GetQueryStatsRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{12}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GetQueryStatsRequest) GetQueryId() string {
@@ -951,7 +951,7 @@ type GetQueryStatsResponse struct {
 
 func (x *GetQueryStatsResponse) Reset() {
 	*x = GetQueryStatsResponse{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[13]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -963,7 +963,7 @@ func (x *GetQueryStatsResponse) String() string {
 func (*GetQueryStatsResponse) ProtoMessage() {}
 
 func (x *GetQueryStatsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[13]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -976,7 +976,7 @@ func (x *GetQueryStatsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetQueryStatsResponse.ProtoReflect.Descriptor instead.
 func (*GetQueryStatsResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{13}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetQueryStatsResponse) GetStats() *QueryStats {
@@ -997,7 +997,7 @@ type DownloadResultRequest struct {
 
 func (x *DownloadResultRequest) Reset() {
 	*x = DownloadResultRequest{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[14]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1009,7 +1009,7 @@ func (x *DownloadResultRequest) String() string {
 func (*DownloadResultRequest) ProtoMessage() {}
 
 func (x *DownloadResultRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[14]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1022,7 +1022,7 @@ func (x *DownloadResultRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DownloadResultRequest.ProtoReflect.Descriptor instead.
 func (*DownloadResultRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{14}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DownloadResultRequest) GetQueryId() string {
@@ -1055,7 +1055,7 @@ type DownloadResultResponse struct {
 
 func (x *DownloadResultResponse) Reset() {
 	*x = DownloadResultResponse{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[15]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1067,7 +1067,7 @@ func (x *DownloadResultResponse) String() string {
 func (*DownloadResultResponse) ProtoMessage() {}
 
 func (x *DownloadResultResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[15]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1080,7 +1080,7 @@ func (x *DownloadResultResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DownloadResultResponse.ProtoReflect.Descriptor instead.
 func (*DownloadResultResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{15}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *DownloadResultResponse) GetChunk() []byte {
@@ -1098,7 +1098,7 @@ type ListDatabasesRequest struct {
 
 func (x *ListDatabasesRequest) Reset() {
 	*x = ListDatabasesRequest{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[16]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1110,7 +1110,7 @@ func (x *ListDatabasesRequest) String() string {
 func (*ListDatabasesRequest) ProtoMessage() {}
 
 func (x *ListDatabasesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[16]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1123,7 +1123,7 @@ func (x *ListDatabasesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDatabasesRequest.ProtoReflect.Descriptor instead.
 func (*ListDatabasesRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{16}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{16}
 }
 
 type ListDatabasesResponse struct {
@@ -1135,7 +1135,7 @@ type ListDatabasesResponse struct {
 
 func (x *ListDatabasesResponse) Reset() {
 	*x = ListDatabasesResponse{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[17]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1147,7 +1147,7 @@ func (x *ListDatabasesResponse) String() string {
 func (*ListDatabasesResponse) ProtoMessage() {}
 
 func (x *ListDatabasesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[17]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1160,7 +1160,7 @@ func (x *ListDatabasesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDatabasesResponse.ProtoReflect.Descriptor instead.
 func (*ListDatabasesResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{17}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ListDatabasesResponse) GetDatabases() []*DatabaseInfo {
@@ -1178,7 +1178,7 @@ type ReloadConfigRequest struct {
 
 func (x *ReloadConfigRequest) Reset() {
 	*x = ReloadConfigRequest{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[18]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1190,7 +1190,7 @@ func (x *ReloadConfigRequest) String() string {
 func (*ReloadConfigRequest) ProtoMessage() {}
 
 func (x *ReloadConfigRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[18]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1203,7 +1203,7 @@ func (x *ReloadConfigRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReloadConfigRequest.ProtoReflect.Descriptor instead.
 func (*ReloadConfigRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{18}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{18}
 }
 
 type ReloadConfigResponse struct {
@@ -1216,7 +1216,7 @@ type ReloadConfigResponse struct {
 
 func (x *ReloadConfigResponse) Reset() {
 	*x = ReloadConfigResponse{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[19]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1228,7 +1228,7 @@ func (x *ReloadConfigResponse) String() string {
 func (*ReloadConfigResponse) ProtoMessage() {}
 
 func (x *ReloadConfigResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[19]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1241,7 +1241,7 @@ func (x *ReloadConfigResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReloadConfigResponse.ProtoReflect.Descriptor instead.
 func (*ReloadConfigResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{19}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ReloadConfigResponse) GetSuccess() bool {
@@ -1266,7 +1266,7 @@ type CanIBeStoppedRequest struct {
 
 func (x *CanIBeStoppedRequest) Reset() {
 	*x = CanIBeStoppedRequest{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[20]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1278,7 +1278,7 @@ func (x *CanIBeStoppedRequest) String() string {
 func (*CanIBeStoppedRequest) ProtoMessage() {}
 
 func (x *CanIBeStoppedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[20]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1291,7 +1291,7 @@ func (x *CanIBeStoppedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CanIBeStoppedRequest.ProtoReflect.Descriptor instead.
 func (*CanIBeStoppedRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{20}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{20}
 }
 
 type CanIBeStoppedResponse struct {
@@ -1304,7 +1304,7 @@ type CanIBeStoppedResponse struct {
 
 func (x *CanIBeStoppedResponse) Reset() {
 	*x = CanIBeStoppedResponse{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[21]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1316,7 +1316,7 @@ func (x *CanIBeStoppedResponse) String() string {
 func (*CanIBeStoppedResponse) ProtoMessage() {}
 
 func (x *CanIBeStoppedResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[21]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1329,7 +1329,7 @@ func (x *CanIBeStoppedResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CanIBeStoppedResponse.ProtoReflect.Descriptor instead.
 func (*CanIBeStoppedResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{21}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *CanIBeStoppedResponse) GetCanBeStopped() bool {
@@ -1355,7 +1355,7 @@ type WatchQueryRequest struct {
 
 func (x *WatchQueryRequest) Reset() {
 	*x = WatchQueryRequest{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[22]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1367,7 +1367,7 @@ func (x *WatchQueryRequest) String() string {
 func (*WatchQueryRequest) ProtoMessage() {}
 
 func (x *WatchQueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[22]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1380,7 +1380,7 @@ func (x *WatchQueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchQueryRequest.ProtoReflect.Descriptor instead.
 func (*WatchQueryRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{22}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *WatchQueryRequest) GetQueryId() string {
@@ -1402,7 +1402,7 @@ type WatchQueryResponse struct {
 
 func (x *WatchQueryResponse) Reset() {
 	*x = WatchQueryResponse{}
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[23]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1414,7 +1414,7 @@ func (x *WatchQueryResponse) String() string {
 func (*WatchQueryResponse) ProtoMessage() {}
 
 func (x *WatchQueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes[23]
+	mi := &file_dbbridge_v1_dbbridge_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1427,7 +1427,7 @@ func (x *WatchQueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchQueryResponse.ProtoReflect.Descriptor instead.
 func (*WatchQueryResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{23}
+	return file_dbbridge_v1_dbbridge_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *WatchQueryResponse) GetQueryId() string {
@@ -1458,11 +1458,11 @@ func (x *WatchQueryResponse) GetError() *QueryError {
 	return nil
 }
 
-var File_api_proto_dbbridge_v1_dbbridge_proto protoreflect.FileDescriptor
+var File_dbbridge_v1_dbbridge_proto protoreflect.FileDescriptor
 
-const file_api_proto_dbbridge_v1_dbbridge_proto_rawDesc = "" +
+const file_dbbridge_v1_dbbridge_proto_rawDesc = "" +
 	"\n" +
-	"$api/proto/dbbridge/v1/dbbridge.proto\x12\vdbbridge.v1\"\xe6\x01\n" +
+	"\x1adbbridge/v1/dbbridge.proto\x12\vdbbridge.v1\"\xe6\x01\n" +
 	"\fQueryOptions\x12\x1d\n" +
 	"\n" +
 	"timeout_ms\x18\x01 \x01(\x03R\ttimeoutMs\x12\x12\n" +
@@ -1579,23 +1579,23 @@ const file_api_proto_dbbridge_v1_dbbridge_proto_rawDesc = "" +
 	"\fReloadConfig\x12 .dbbridge.v1.ReloadConfigRequest\x1a!.dbbridge.v1.ReloadConfigResponse\x12V\n" +
 	"\rCanIBeStopped\x12!.dbbridge.v1.CanIBeStoppedRequest\x1a\".dbbridge.v1.CanIBeStoppedResponse\x12O\n" +
 	"\n" +
-	"WatchQuery\x12\x1e.dbbridge.v1.WatchQueryRequest\x1a\x1f.dbbridge.v1.WatchQueryResponse0\x01B8Z6dbbridge/internal/gen/api/proto/dbbridge/v1;dbbridgev1b\x06proto3"
+	"WatchQuery\x12\x1e.dbbridge.v1.WatchQueryRequest\x1a\x1f.dbbridge.v1.WatchQueryResponse0\x01BBZ@github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1;dbbridgev1b\x06proto3"
 
 var (
-	file_api_proto_dbbridge_v1_dbbridge_proto_rawDescOnce sync.Once
-	file_api_proto_dbbridge_v1_dbbridge_proto_rawDescData []byte
+	file_dbbridge_v1_dbbridge_proto_rawDescOnce sync.Once
+	file_dbbridge_v1_dbbridge_proto_rawDescData []byte
 )
 
-func file_api_proto_dbbridge_v1_dbbridge_proto_rawDescGZIP() []byte {
-	file_api_proto_dbbridge_v1_dbbridge_proto_rawDescOnce.Do(func() {
-		file_api_proto_dbbridge_v1_dbbridge_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_api_proto_dbbridge_v1_dbbridge_proto_rawDesc), len(file_api_proto_dbbridge_v1_dbbridge_proto_rawDesc)))
+func file_dbbridge_v1_dbbridge_proto_rawDescGZIP() []byte {
+	file_dbbridge_v1_dbbridge_proto_rawDescOnce.Do(func() {
+		file_dbbridge_v1_dbbridge_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_dbbridge_v1_dbbridge_proto_rawDesc), len(file_dbbridge_v1_dbbridge_proto_rawDesc)))
 	})
-	return file_api_proto_dbbridge_v1_dbbridge_proto_rawDescData
+	return file_dbbridge_v1_dbbridge_proto_rawDescData
 }
 
-var file_api_proto_dbbridge_v1_dbbridge_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
-var file_api_proto_dbbridge_v1_dbbridge_proto_goTypes = []any{
+var file_dbbridge_v1_dbbridge_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_dbbridge_v1_dbbridge_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_dbbridge_v1_dbbridge_proto_goTypes = []any{
 	(QueryState)(0),                // 0: dbbridge.v1.QueryState
 	(*QueryOptions)(nil),           // 1: dbbridge.v1.QueryOptions
 	(*QueryError)(nil),             // 2: dbbridge.v1.QueryError
@@ -1622,7 +1622,7 @@ var file_api_proto_dbbridge_v1_dbbridge_proto_goTypes = []any{
 	(*WatchQueryRequest)(nil),      // 23: dbbridge.v1.WatchQueryRequest
 	(*WatchQueryResponse)(nil),     // 24: dbbridge.v1.WatchQueryResponse
 }
-var file_api_proto_dbbridge_v1_dbbridge_proto_depIdxs = []int32{
+var file_dbbridge_v1_dbbridge_proto_depIdxs = []int32{
 	1,  // 0: dbbridge.v1.QueryRecord.options:type_name -> dbbridge.v1.QueryOptions
 	0,  // 1: dbbridge.v1.QueryRecord.state:type_name -> dbbridge.v1.QueryState
 	2,  // 2: dbbridge.v1.QueryRecord.error:type_name -> dbbridge.v1.QueryError
@@ -1661,27 +1661,27 @@ var file_api_proto_dbbridge_v1_dbbridge_proto_depIdxs = []int32{
 	0,  // [0:13] is the sub-list for field type_name
 }
 
-func init() { file_api_proto_dbbridge_v1_dbbridge_proto_init() }
-func file_api_proto_dbbridge_v1_dbbridge_proto_init() {
-	if File_api_proto_dbbridge_v1_dbbridge_proto != nil {
+func init() { file_dbbridge_v1_dbbridge_proto_init() }
+func file_dbbridge_v1_dbbridge_proto_init() {
+	if File_dbbridge_v1_dbbridge_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_dbbridge_v1_dbbridge_proto_rawDesc), len(file_api_proto_dbbridge_v1_dbbridge_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dbbridge_v1_dbbridge_proto_rawDesc), len(file_dbbridge_v1_dbbridge_proto_rawDesc)),
 			NumEnums:      1,
 			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_api_proto_dbbridge_v1_dbbridge_proto_goTypes,
-		DependencyIndexes: file_api_proto_dbbridge_v1_dbbridge_proto_depIdxs,
-		EnumInfos:         file_api_proto_dbbridge_v1_dbbridge_proto_enumTypes,
-		MessageInfos:      file_api_proto_dbbridge_v1_dbbridge_proto_msgTypes,
+		GoTypes:           file_dbbridge_v1_dbbridge_proto_goTypes,
+		DependencyIndexes: file_dbbridge_v1_dbbridge_proto_depIdxs,
+		EnumInfos:         file_dbbridge_v1_dbbridge_proto_enumTypes,
+		MessageInfos:      file_dbbridge_v1_dbbridge_proto_msgTypes,
 	}.Build()
-	File_api_proto_dbbridge_v1_dbbridge_proto = out.File
-	file_api_proto_dbbridge_v1_dbbridge_proto_goTypes = nil
-	file_api_proto_dbbridge_v1_dbbridge_proto_depIdxs = nil
+	File_dbbridge_v1_dbbridge_proto = out.File
+	file_dbbridge_v1_dbbridge_proto_goTypes = nil
+	file_dbbridge_v1_dbbridge_proto_depIdxs = nil
 }

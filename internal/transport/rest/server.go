@@ -67,7 +67,7 @@ func (s *Server) setupRoutes() {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("OK"))
+	writeText(w, "OK")
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
@@ -76,11 +76,11 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	// and stops routing new traffic while in-flight queries finish.
 	if s.svc == nil || s.svc.IsDraining() {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("NOT READY"))
+		writeText(w, "NOT READY")
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("READY"))
+	writeText(w, "READY")
 }
 
 type StartQueryPayload struct {
@@ -126,8 +126,8 @@ func (s *Server) handleStartQuery(w http.ResponseWriter, r *http.Request) {
 
 	record, err := s.svc.StartQuery(r.Context(), payload.DatabaseID, payload.SQL, opts)
 	if err != nil {
-		if _, ok := errors.AsType[domain.DrainingError](err); ok {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		if drainErr, ok := errors.AsType[domain.DrainingError](err); ok {
+			http.Error(w, drainErr.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		http.Error(w, "failed to start query: "+err.Error(), http.StatusInternalServerError)
@@ -140,7 +140,7 @@ func (s *Server) handleStartQuery(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.WriteHeader(http.StatusAccepted)
 	}
-	_ = json.NewEncoder(w).Encode(record)
+	writeJSON(w, record)
 }
 
 func (s *Server) handleGetQueryStatus(w http.ResponseWriter, r *http.Request) {
@@ -158,7 +158,7 @@ func (s *Server) handleGetQueryStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(record)
+	writeJSON(w, record)
 }
 
 func (s *Server) handleStopQuery(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +175,7 @@ func (s *Server) handleStopQuery(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{
+	writeJSON(w, map[string]string{
 		"query_id": id,
 		"status":   "STOPPED",
 	})
@@ -196,7 +196,7 @@ func (s *Server) handleGetQueryStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(stats)
+	writeJSON(w, stats)
 }
 
 func (s *Server) handleDownloadResult(w http.ResponseWriter, r *http.Request) {
@@ -244,7 +244,11 @@ func (s *Server) handleDownloadResult(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to download results: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer reader.Close()
+	defer func() {
+		if cerr := reader.Close(); cerr != nil {
+			log.Printf("ERROR: failed to close result reader: %v", cerr)
+		}
+	}()
 
 	contentType := "application/octet-stream"
 	switch ref.Format {
@@ -311,7 +315,7 @@ func (s *Server) handleListDatabases(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(dbs)
+	writeJSON(w, dbs)
 }
 
 func (s *Server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
@@ -319,7 +323,7 @@ func (s *Server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(w, map[string]any{
 			"success": false,
 			"message": err.Error(),
 		})
@@ -327,7 +331,7 @@ func (s *Server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, map[string]any{
 		"success": true,
 		"message": "Config reloaded successfully",
 		"report":  report,
@@ -338,8 +342,23 @@ func (s *Server) handleCanIBeStopped(w http.ResponseWriter, r *http.Request) {
 	canStop, inFlight := s.svc.CanIBeStopped(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, map[string]any{
 		"can_be_stopped": canStop,
 		"in_flight":      inFlight,
 	})
+}
+
+// writeJSON encodes v into the response body. The status line is already sent
+// by the time encoding runs, so a failure can only be logged.
+func writeJSON(w http.ResponseWriter, v any) {
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("ERROR: failed to encode JSON response: %v", err)
+	}
+}
+
+// writeText writes a plain-text body, used by the health and readiness probes.
+func writeText(w http.ResponseWriter, body string) {
+	if _, err := io.WriteString(w, body); err != nil {
+		log.Printf("ERROR: failed to write response body: %v", err)
+	}
 }

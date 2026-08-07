@@ -1,23 +1,90 @@
+version: "2"
+
 run:
-  timeout: 5m
   issues-exit-code: 1
   tests: true
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
-    - gosimple
     - govet
     - ineffassign
-    - staticcheck
-    - unused
-    - gofmt
-    - goimports
     - misspell
     - revive
+    - staticcheck
+    - unused
+
+  settings:
+    errcheck:
+      # The codebase silences errors with `_ = f()` in places where the error
+      # is in fact significant (result finalization, state persistence).
+      # Without check-blank those sites stay invisible to the linter.
+      check-blank: true
+
+    revive:
+      # Explicit rule list. Omitted from revive's default set:
+      #   - `exported` / `package-comments`: this codebase does not document
+      #     every exported symbol.
+      #   - `unused-parameter`: every hit is an interface-satisfying signature
+      #     (MetaStore, ResultStore, connect handlers, http.HandlerFunc).
+      #     Renaming an ignored `ctx` to `_` would also disguise the storage
+      #     backends that wrongly drop the context as if that were intentional.
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: var-declaration
+        - name: var-naming
+
+  exclusions:
+    generated: lax
+    rules:
+      # check-blank makes errcheck reject `_ = f()` as well, which in tests
+      # would mean hand-handling every `defer resp.Body.Close()`. Keep the
+      # strict check where a dropped error can corrupt state: production code.
+      - path: _test\.go
+        linters:
+          - errcheck
+      # The S3 backend still builds on the deprecated feature/s3/manager
+      # uploader. Moving to feature/s3/transfermanager rewrites the upload
+      # path and belongs with the context-propagation fix, not with the
+      # lint configuration.
+      - path: internal/storage/backends/s3/storage\.go
+        linters:
+          - staticcheck
+        text: SA1019
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 
 issues:
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

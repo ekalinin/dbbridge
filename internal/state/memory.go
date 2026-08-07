@@ -2,7 +2,6 @@ package state
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 	"time"
 
@@ -237,13 +236,4 @@ func (m *MemoryMetaStore) Close() error {
 	}
 	m.subscribers = nil
 	return nil
-}
-
-// Marshal helper for deep copying or serialization in tests if needed
-func deepCopy(src, dst any) error {
-	b, err := json.Marshal(src)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(b, dst)
 }

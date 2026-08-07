@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/ekalinin/dbbridge/internal/core/service"
-	v1 "github.com/ekalinin/dbbridge/internal/gen/api/proto/dbbridge/v1"
-	"github.com/ekalinin/dbbridge/internal/gen/api/proto/dbbridge/v1/dbbridgev1connect"
+	v1 "github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1"
+	"github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1/dbbridgev1connect"
 	"github.com/ekalinin/dbbridge/internal/lifecycle"
 	"github.com/ekalinin/dbbridge/internal/testutil"
 	"github.com/ekalinin/dbbridge/internal/transport/grpcconnect"

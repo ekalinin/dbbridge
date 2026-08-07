@@ -101,7 +101,9 @@ func (qm *QueryManager) syncPools() error {
 	// Close old pools that were removed or need recreate
 	for id, pool := range oldPools {
 		log.Printf("Closing database pool %s", id)
-		_ = pool.Close()
+		if err := pool.Close(); err != nil {
+			log.Printf("ERROR: failed to close database pool %s: %v", id, err)
+		}
 	}
 
 	qm.dbPools = newPools
@@ -219,7 +221,11 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 	// query cannot emit its terminal event before we are listening (avoids a hang).
 	var syncCh <-chan QueryEvent
 	if opts.Mode == "sync" {
-		syncCh, _ = qm.Watch(ctx, queryID)
+		ch, werr := qm.Watch(ctx, queryID)
+		if werr != nil {
+			log.Printf("ERROR: failed to watch query %s in sync mode: %v", queryID, werr)
+		}
+		syncCh = ch
 	}
 
 	// Async execution
@@ -262,7 +268,9 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	record.State = domain.StateRunning
 	record.StartedAt = startTime
 	record.LeaseDeadline = time.Now().Add(qm.cfgManager.Get().Instance.HeartbeatTTL)
-	_ = qm.metaStore.PutQuery(context.Background(), record)
+	if err := qm.metaStore.PutQuery(context.Background(), record); err != nil {
+		log.Printf("ERROR: failed to persist RUNNING state for query %s: %v", record.ID, err)
+	}
 	qm.notifyWatchers(QueryEvent{QueryID: record.ID, State: domain.StateRunning})
 	telemetry.RecordQueryStarted()
 
@@ -279,7 +287,11 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 		}, dbDuration, 0)
 		return
 	}
-	defer rowsStream.Close()
+	defer func() {
+		if cerr := rowsStream.Close(); cerr != nil {
+			log.Printf("ERROR: failed to close row stream for query %s: %v", record.ID, cerr)
+		}
+	}()
 
 	// Initialize Result Store Writer
 	store, err := storage.GetStore(record.Options.StorageBackend)
@@ -306,18 +318,20 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	// Stream and Persist Rows
 	storeStart := time.Now()
 	rowsCount, bytesWritten, err := storage.EncodeStream(ctx, rowsStream, record.Options.ResultFormat, writer)
-	_ = writer.Close()
+	if cerr := writer.Close(); cerr != nil {
+		log.Printf("ERROR: failed to close result writer for query %s: %v", record.ID, cerr)
+	}
 	storeDuration := time.Since(storeStart)
 
 	if err != nil {
 		// If execution was canceled
 		if errors.Is(err, context.Canceled) {
-			_ = store.Delete(context.Background(), ref) // clean up partial file
+			deletePartial(store, ref, record.ID)
 			qm.finishWithCancel(record, dbDuration, storeDuration)
 			return
 		}
 
-		_ = store.Delete(context.Background(), ref) // clean up partial file
+		deletePartial(store, ref, record.ID)
 		qm.finishWithError(record, &domain.QueryError{
 			Code:    "STREAM_ENCODE_FAILED",
 			Message: err.Error(),
@@ -340,7 +354,9 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 		TotalDuration:        time.Since(startTime),
 	}
 
-	_ = qm.metaStore.PutQuery(context.Background(), record)
+	if err := qm.metaStore.PutQuery(context.Background(), record); err != nil {
+		log.Printf("ERROR: failed to persist SUCCEEDED state for query %s: %v", record.ID, err)
+	}
 	qm.notifyWatchers(QueryEvent{
 		QueryID: record.ID,
 		State:   domain.StateSucceeded,
@@ -361,7 +377,9 @@ func (qm *QueryManager) finishWithError(rec *domain.QueryRecord, qErr *domain.Qu
 	rec.Stats.StorageWriteDuration = storeDur
 	rec.Stats.TotalDuration = time.Since(rec.CreatedAt)
 
-	_ = qm.metaStore.PutQuery(context.Background(), rec)
+	if err := qm.metaStore.PutQuery(context.Background(), rec); err != nil {
+		log.Printf("ERROR: failed to persist FAILED state for query %s: %v", rec.ID, err)
+	}
 	qm.notifyWatchers(QueryEvent{
 		QueryID: rec.ID,
 		State:   domain.StateFailed,
@@ -381,7 +399,9 @@ func (qm *QueryManager) finishWithCancel(rec *domain.QueryRecord, dbDur, storeDu
 	rec.Stats.StorageWriteDuration = storeDur
 	rec.Stats.TotalDuration = time.Since(rec.CreatedAt)
 
-	_ = qm.metaStore.PutQuery(context.Background(), rec)
+	if err := qm.metaStore.PutQuery(context.Background(), rec); err != nil {
+		log.Printf("ERROR: failed to persist CANCELED state for query %s: %v", rec.ID, err)
+	}
 	qm.notifyWatchers(QueryEvent{
 		QueryID: rec.ID,
 		State:   domain.StateCanceled,
@@ -564,19 +584,25 @@ func (qm *QueryManager) collectGarbage() {
 			// Transition to EXPIRED before deleting (spec state machine §3).
 			if rec.State != domain.StateExpired {
 				rec.State = domain.StateExpired
-				_ = qm.metaStore.UpdateQuery(gcCtx, rec)
+				if err := qm.metaStore.UpdateQuery(gcCtx, rec); err != nil {
+					log.Printf("ERROR: GC failed to mark query %s as EXPIRED: %v", id, err)
+				}
 				qm.notifyWatchers(QueryEvent{QueryID: id, State: domain.StateExpired})
 			}
 			if rec.Result != nil {
 				store, err := storage.GetStore(rec.Result.Backend)
 				if err == nil {
 					log.Printf("GC: Deleting results storage for query %s", id)
-					_ = store.Delete(gcCtx, *rec.Result)
+					if err := store.Delete(gcCtx, *rec.Result); err != nil {
+						log.Printf("ERROR: GC failed to delete results for query %s: %v", id, err)
+					}
 				}
 			}
 		}
 		log.Printf("GC: Deleting metadata for expired query %s", id)
-		_ = qm.metaStore.DeleteQuery(gcCtx, id)
+		if err := qm.metaStore.DeleteQuery(gcCtx, id); err != nil {
+			log.Printf("ERROR: GC failed to delete metadata for query %s: %v", id, err)
+		}
 		gcCancel()
 	}
 }
@@ -671,8 +697,19 @@ func (qm *QueryManager) Close() error {
 
 	qm.dbPoolsMu.Lock()
 	defer qm.dbPoolsMu.Unlock()
-	for _, pool := range qm.dbPools {
-		_ = pool.Close()
+	for id, pool := range qm.dbPools {
+		if err := pool.Close(); err != nil {
+			log.Printf("ERROR: failed to close database pool %s: %v", id, err)
+		}
 	}
 	return nil
+}
+
+// deletePartial removes a partially written result after a failed or canceled
+// stream. The query already carries its own terminal error, so a cleanup
+// failure is only reported.
+func deletePartial(store storage.ResultStore, ref domain.ResultRef, queryID string) {
+	if err := store.Delete(context.Background(), ref); err != nil {
+		log.Printf("ERROR: failed to delete partial result for query %s: %v", queryID, err)
+	}
 }

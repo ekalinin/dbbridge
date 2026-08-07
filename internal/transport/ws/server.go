@@ -41,7 +41,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("WS: Accept failed: %v", err)
 		return
 	}
-	defer conn.CloseNow()
+	defer func() {
+		if err := conn.CloseNow(); err != nil {
+			log.Printf("WS: close failed: %v", err)
+		}
+	}()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
