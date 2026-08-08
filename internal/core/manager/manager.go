@@ -37,7 +37,7 @@ type QueryManager struct {
 	instanceID  string
 	activeReg   map[string]context.CancelFunc
 	activeRegMu sync.RWMutex
-	watchers    map[string][]chan QueryEvent
+	watchers    map[string]map[chan QueryEvent]struct{}
 	watchersMu  sync.RWMutex
 	wg          sync.WaitGroup
 	ctx         context.Context
@@ -52,7 +52,7 @@ func NewQueryManager(cfgManager *config.Manager, metaStore state.MetaStore) (*Qu
 		dbPools:    make(map[string]db.Pool),
 		instanceID: cfgManager.Get().Instance.ID,
 		activeReg:  make(map[string]context.CancelFunc),
-		watchers:   make(map[string][]chan QueryEvent),
+		watchers:   make(map[string]map[chan QueryEvent]struct{}),
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -455,33 +455,52 @@ func (qm *QueryManager) Watch(ctx context.Context, queryID string) (<-chan Query
 	ch := make(chan QueryEvent, 20)
 
 	qm.watchersMu.Lock()
-	qm.watchers[queryID] = append(qm.watchers[queryID], ch)
+	subs, ok := qm.watchers[queryID]
+	if !ok {
+		subs = make(map[chan QueryEvent]struct{})
+		qm.watchers[queryID] = subs
+	}
+	subs[ch] = struct{}{}
 	qm.watchersMu.Unlock()
 
 	go func() {
 		<-ctx.Done()
-		qm.watchersMu.Lock()
-		defer qm.watchersMu.Unlock()
-		list := qm.watchers[queryID]
-		if i := slices.Index(list, ch); i != -1 {
-			qm.watchers[queryID] = append(list[:i], list[i+1:]...)
-			close(ch)
-		}
+		qm.unwatch(queryID, ch)
 	}()
 
 	return ch, nil
 }
 
-func (qm *QueryManager) notifyWatchers(ev QueryEvent) {
-	qm.watchersMu.RLock()
-	watchersList, ok := qm.watchers[ev.QueryID]
-	qm.watchersMu.RUnlock()
+// unwatch drops the subscription and closes its channel. Both happen under the
+// write lock, which notifyWatchers holds for reading while it sends, so a
+// channel can never be closed with a send in flight.
+func (qm *QueryManager) unwatch(queryID string, ch chan QueryEvent) {
+	qm.watchersMu.Lock()
+	defer qm.watchersMu.Unlock()
 
+	subs, ok := qm.watchers[queryID]
 	if !ok {
 		return
 	}
+	if _, ok := subs[ch]; !ok {
+		return
+	}
 
-	for _, ch := range watchersList {
+	delete(subs, ch)
+	if len(subs) == 0 {
+		delete(qm.watchers, queryID)
+	}
+	close(ch)
+}
+
+func (qm *QueryManager) notifyWatchers(ev QueryEvent) {
+	// The read lock is held across the sends, not just around the lookup: it is
+	// what keeps unwatch from closing a channel mid-send. The sends are
+	// non-blocking, so the critical section stays bounded.
+	qm.watchersMu.RLock()
+	defer qm.watchersMu.RUnlock()
+
+	for ch := range qm.watchers[ev.QueryID] {
 		select {
 		case ch <- ev:
 		default:

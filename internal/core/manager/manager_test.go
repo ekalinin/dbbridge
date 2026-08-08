@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -283,6 +284,49 @@ func TestCollectGarbage_ExpiresAndDeletes(t *testing.T) {
 	if _, err := ms.GetQuery(context.Background(), "expired-1"); err == nil {
 		t.Error("expected expired query metadata to be deleted")
 	}
+}
+
+// TestWatch_UnsubscribeDuringNotify cancels subscriptions while notifications
+// are in flight, which is what a client disconnecting during query completion
+// does. It guards two races: sending into a channel that the unsubscribe path
+// closes, and removing a watcher from the registry a notifier is iterating.
+func TestWatch_UnsubscribeDuringNotify(t *testing.T) {
+	qm, _ := newManager(t)
+
+	const (
+		queryID     = "watch-race"
+		subscribers = 50
+		notifiers   = 8
+		events      = 200
+	)
+
+	var wg sync.WaitGroup
+	for range subscribers {
+		ctx, cancel := context.WithCancel(context.Background())
+		ch, err := qm.Watch(ctx, queryID)
+		if err != nil {
+			cancel()
+			t.Fatalf("Watch: %v", err)
+		}
+		wg.Go(func() {
+			for ev := range ch {
+				if ev.QueryID != queryID {
+					t.Errorf("watch event for %q, want %q", ev.QueryID, queryID)
+				}
+			}
+		})
+		wg.Go(cancel)
+	}
+
+	for range notifiers {
+		wg.Go(func() {
+			for range events {
+				qm.notifyWatchers(QueryEvent{QueryID: queryID, State: domain.StateRunning})
+			}
+		})
+	}
+
+	wg.Wait()
 }
 
 // ── fakes ────────────────────────────────────────────────────────────────────
