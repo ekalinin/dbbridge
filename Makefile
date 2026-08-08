@@ -10,9 +10,9 @@ LDFLAGS       := -ldflags="-w -s"
 GO_BUILD      := CGO_ENABLED=0 go build $(LDFLAGS)
 
 .PHONY: all build clean run \
-        proto \
-        test test-unit test-integration \
-        lint vet fmt \
+        proto proto-lint \
+        test test-unit test-integration test-e2e test-all test-race \
+        lint vet fmt fmt-check check ci \
         docker-build docker-push \
         up down logs restart \
         reload-config can-stop \
@@ -54,6 +54,13 @@ test-integration:
 test-e2e:
 	go test ./test/e2e/... -count=1 -timeout 300s
 
+# Same scope as CI: every package, including test/e2e.
+test-all:
+	go test ./... -count=1
+
+test-race:
+	go test -race ./... -count=1
+
 # ── Quality ──────────────────────────────────────────────────────────────────
 
 lint:
@@ -65,7 +72,14 @@ vet:
 fmt:
 	gofmt -l -w .
 
+# Read-only counterpart of `fmt`: reports unformatted files and fails.
+fmt-check:
+	@out="$$(gofmt -l .)"; test -z "$$out" || { echo "$$out"; exit 1; }
+
 check: vet lint
+
+# The CI workflow runs these same targets, one per step.
+ci: fmt-check vet test-all test-race lint proto-lint
 
 # ── Docker ───────────────────────────────────────────────────────────────────
 

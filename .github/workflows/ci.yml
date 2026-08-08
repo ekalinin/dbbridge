@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # Install only: the command itself comes from the Makefile, so `make lint`
+      # locally and in CI is the exact same invocation.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          install-only: true
+
+      - name: gofmt
+        run: make fmt-check
+
+      - name: go vet
+        run: make vet
+
+      - name: go test
+        run: make test-all
+
+      - name: go test -race
+        run: make test-race
+
+      - name: golangci-lint
+        run: make lint
+
+  proto:
+    name: Proto
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # Install buf only: the action's own defaults would also run format and
+      # breaking-change detection, and breaking needs extra history and rights.
+      - uses: bufbuild/buf-action@v1
+        with:
+          version: 1.70.0
+          setup_only: true
+
+      - name: buf lint
+        run: make proto-lint
