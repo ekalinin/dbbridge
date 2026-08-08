@@ -25,6 +25,7 @@ make lint                     # golangci-lint run ./...
 make vet                      # go vet ./...
 make fmt                      # gofmt -l -w .
 make check                    # vet + lint
+make ci                       # everything CI runs (fmt-check, vet, tests, race, lint, buf lint)
 
 # Protobuf
 make proto                    # buf generate (regenerates internal/gen/)
