@@ -6,10 +6,12 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 
 	"github.com/ekalinin/dbbridge/internal/core/domain"
 
+	// Registers the "clickhouse" driver with database/sql.
 	_ "github.com/ClickHouse/clickhouse-go/v2"
 )
 
@@ -40,7 +42,7 @@ func NewClickHouseResultStore(dsn, table string) (*ClickHouseResultStore, error)
 	`, table)
 
 	if _, err := dbConn.ExecContext(ctx, query); err != nil {
-		_ = dbConn.Close()
+		logClose("connection", dbConn.Close)
 		return nil, fmt.Errorf("failed to create clickhouse results table: %w", err)
 	}
 
@@ -90,17 +92,17 @@ func (s *ClickHouseResultStore) Writer(ctx context.Context, queryID string, form
 		insertQuery := fmt.Sprintf("INSERT INTO %s (query_id, chunk_id, format, data) VALUES (?, ?, ?, ?)", s.table)
 		stmt, err := tx.Prepare(insertQuery)
 		if err != nil {
-			_ = tx.Rollback()
+			logClose("rollback", tx.Rollback)
 			pwWrapper.err = err
 			_ = pr.CloseWithError(err)
 			return
 		}
-		defer stmt.Close()
+		defer logClose("statement", stmt.Close)
 
 		for scanner.Scan() {
 			line := scanner.Text()
 			if _, err := stmt.Exec(queryID, chunkID, format, line); err != nil {
-				_ = tx.Rollback()
+				logClose("rollback", tx.Rollback)
 				pwWrapper.err = err
 				_ = pr.CloseWithError(err)
 				return
@@ -121,7 +123,7 @@ func (s *ClickHouseResultStore) Writer(ctx context.Context, queryID string, form
 				}
 				stmt, err = tx.Prepare(insertQuery)
 				if err != nil {
-					_ = tx.Rollback()
+					logClose("rollback", tx.Rollback)
 					pwWrapper.err = err
 					_ = pr.CloseWithError(err)
 					return
@@ -130,7 +132,7 @@ func (s *ClickHouseResultStore) Writer(ctx context.Context, queryID string, form
 		}
 
 		if err := scanner.Err(); err != nil {
-			_ = tx.Rollback()
+			logClose("rollback", tx.Rollback)
 			pwWrapper.err = err
 			_ = pr.CloseWithError(err)
 			return
@@ -141,7 +143,7 @@ func (s *ClickHouseResultStore) Writer(ctx context.Context, queryID string, form
 			_ = pr.CloseWithError(err)
 			return
 		}
-		_ = pr.Close()
+		logClose("insert pipe", pr.Close)
 	})
 
 	ref := domain.ResultRef{
@@ -154,13 +156,11 @@ func (s *ClickHouseResultStore) Writer(ctx context.Context, queryID string, form
 }
 
 type clickhouseReader struct {
-	rows        *sql.Rows
-	currentLine []byte
-	lineReader  *io.PipeReader
-	err         error
-	mu          sync.Mutex
-	isClosed    bool
-	closeCh     chan struct{}
+	rows       *sql.Rows
+	lineReader *io.PipeReader
+	mu         sync.Mutex
+	isClosed   bool
+	closeCh    chan struct{}
 }
 
 func (r *clickhouseReader) Read(p []byte) (n int, err error) {
@@ -177,8 +177,8 @@ func (r *clickhouseReader) Close() error {
 	r.mu.Unlock()
 
 	close(r.closeCh)
-	_ = r.lineReader.Close()
-	_ = r.rows.Close()
+	logClose("reader pipe", r.lineReader.Close)
+	logClose("rows", r.rows.Close)
 	return nil
 }
 
@@ -199,8 +199,8 @@ func (s *ClickHouseResultStore) Reader(ctx context.Context, ref domain.ResultRef
 	}
 
 	go func() {
-		defer pw.Close()
-		defer rows.Close()
+		defer logClose("reader pipe", pw.Close)
+		defer logClose("rows", rows.Close)
 
 		for rows.Next() {
 			select {
@@ -254,4 +254,13 @@ func (s *ClickHouseResultStore) Delete(ctx context.Context, ref domain.ResultRef
 
 func (s *ClickHouseResultStore) Close() error {
 	return s.db.Close()
+}
+
+// logClose runs a Close-like function and reports a failure. ClickHouse
+// cleanup happens on paths that already carry a primary error, so the only
+// useful action left is to make the secondary failure visible.
+func logClose(what string, fn func() error) {
+	if err := fn(); err != nil {
+		log.Printf("ERROR: clickhouse %s close failed: %v", what, err)
+	}
 }

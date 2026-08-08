@@ -22,7 +22,7 @@ import (
 	"github.com/ekalinin/dbbridge/internal/transport/grpcconnect"
 	"github.com/ekalinin/dbbridge/internal/transport/rest"
 
-	v1connect "github.com/ekalinin/dbbridge/internal/gen/api/proto/dbbridge/v1/dbbridgev1connect"
+	v1connect "github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1/dbbridgev1connect"
 
 	// Register drivers statically
 	_ "github.com/ekalinin/dbbridge/internal/db/drivers/clickhouse"
@@ -52,7 +52,9 @@ func main() {
 		defer func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_ = otelShutdown(ctx)
+			if err := otelShutdown(ctx); err != nil {
+				log.Printf("ERROR: OpenTelemetry shutdown failed: %v", err)
+			}
 		}()
 	}
 
@@ -65,7 +67,11 @@ func main() {
 		log.Println("Using In-Memory MetaStore (single-node only)")
 		metaStore = state.NewMemoryMetaStore()
 	}
-	defer metaStore.Close()
+	defer func() {
+		if err := metaStore.Close(); err != nil {
+			log.Printf("ERROR: MetaStore close failed: %v", err)
+		}
+	}()
 
 	// 3. Initialize Storage backends
 	fsStore, err := fs.NewFSResultStore(cfg.Storage.FS.Root)
@@ -97,7 +103,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize QueryManager: %v", err)
 	}
-	defer qm.Close()
+	defer func() {
+		if err := qm.Close(); err != nil {
+			log.Printf("ERROR: QueryManager close failed: %v", err)
+		}
+	}()
 
 	svc := service.NewQueryService(qm, lm)
 
@@ -176,8 +186,12 @@ func main() {
 
 		// Shutdown HTTP Servers
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = restHTTP.Shutdown(ctx)
-		_ = grpcHTTP.Shutdown(ctx)
+		if err := restHTTP.Shutdown(ctx); err != nil {
+			log.Printf("ERROR: REST server shutdown failed: %v", err)
+		}
+		if err := grpcHTTP.Shutdown(ctx); err != nil {
+			log.Printf("ERROR: gRPC server shutdown failed: %v", err)
+		}
 		cancel()
 
 		log.Println("dbbridge stopped.")

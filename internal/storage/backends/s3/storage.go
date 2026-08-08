@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 
 	"github.com/ekalinin/dbbridge/internal/core/domain"
@@ -52,10 +53,9 @@ func NewS3ResultStore(ctx context.Context, bucket, region, endpoint, keyID, secr
 }
 
 type pipeWriter struct {
-	pw       *io.PipeWriter
-	wg       sync.WaitGroup
-	err      error
-	uploadID string
+	pw  *io.PipeWriter
+	wg  sync.WaitGroup
+	err error
 }
 
 func (w *pipeWriter) Write(p []byte) (int, error) {
@@ -85,9 +85,11 @@ func (s *S3ResultStore) Writer(ctx context.Context, queryID string, format strin
 		})
 		if err != nil {
 			pwWrapper.err = err
-			_ = pr.CloseWithError(err)
-		} else {
-			_ = pr.Close()
+			if cerr := pr.CloseWithError(err); cerr != nil {
+				log.Printf("ERROR: failed to close s3 upload pipe: %v", cerr)
+			}
+		} else if cerr := pr.Close(); cerr != nil {
+			log.Printf("ERROR: failed to close s3 upload pipe: %v", cerr)
 		}
 	})
 

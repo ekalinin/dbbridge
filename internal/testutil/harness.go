@@ -88,7 +88,9 @@ func NewService(t *testing.T) (*service.QueryService, *lifecycle.Manager) {
 	if _, err := fmt.Fprintf(cfgFile, configTemplate, resultsDir); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	cfgFile.Close()
+	if err := cfgFile.Close(); err != nil {
+		t.Fatalf("close config file: %v", err)
+	}
 
 	cfgMgr, err := config.NewManager(cfgFile.Name())
 	if err != nil {
@@ -96,13 +98,21 @@ func NewService(t *testing.T) (*service.QueryService, *lifecycle.Manager) {
 	}
 
 	ms := state.NewMemoryMetaStore()
-	t.Cleanup(func() { ms.Close() })
+	t.Cleanup(func() {
+		if err := ms.Close(); err != nil {
+			t.Errorf("close metastore: %v", err)
+		}
+	})
 
 	qm, err := manager.NewQueryManager(cfgMgr, ms)
 	if err != nil {
 		t.Fatalf("manager.NewQueryManager: %v", err)
 	}
-	t.Cleanup(func() { qm.Close() })
+	t.Cleanup(func() {
+		if err := qm.Close(); err != nil {
+			t.Errorf("close query manager: %v", err)
+		}
+	})
 
 	lm := lifecycle.NewManager()
 	return service.NewQueryService(qm, lm), lm

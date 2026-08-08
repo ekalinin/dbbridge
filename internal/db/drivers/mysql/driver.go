@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 
 	"github.com/ekalinin/dbbridge/internal/db"
 
+	// Registers the driver with database/sql.
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -29,7 +31,9 @@ func (d *mysqlDriver) Open(ctx context.Context, dsn string, maxConns int) (db.Po
 
 	// Verify connection
 	if err := dbConn.PingContext(ctx); err != nil {
-		_ = dbConn.Close()
+		if cerr := dbConn.Close(); cerr != nil {
+			log.Printf("ERROR: failed to close mysql connection after failed ping: %v", cerr)
+		}
 		return nil, fmt.Errorf("failed to ping mysql: %w", err)
 	}
 
