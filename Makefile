@@ -78,7 +78,7 @@ fmt-check:
 
 check: vet lint
 
-# Local equivalent of the CI workflow.
+# The CI workflow runs these same targets, one per step.
 ci: fmt-check vet test-all test-race lint proto-lint
 
 # ── Docker ───────────────────────────────────────────────────────────────────

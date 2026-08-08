@@ -22,24 +22,27 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-
-      # `gofmt -l` exits 0 even when it lists files, so fail explicitly.
-      - name: gofmt
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: go test
-        run: go test ./... -count=1
-
-      - name: go test -race
-        run: go test -race ./... -count=1
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+      # Install only: the command itself comes from the Makefile, so `make lint`
+      # locally and in CI is the exact same invocation.
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
+          install-only: true
+
+      - name: gofmt
+        run: make fmt-check
+
+      - name: go vet
+        run: make vet
+
+      - name: go test
+        run: make test-all
+
+      - name: go test -race
+        run: make test-race
+
+      - name: golangci-lint
+        run: make lint
 
   proto:
     name: Proto
@@ -55,4 +58,4 @@ jobs:
           setup_only: true
 
       - name: buf lint
-        run: buf lint
+        run: make proto-lint
