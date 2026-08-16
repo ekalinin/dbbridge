@@ -38,13 +38,36 @@ type MetaStore interface {
 	// UpdateQuery updates an existing query record.
 	UpdateQuery(ctx context.Context, record *domain.QueryRecord) error
 
+	// UpdateQueryIfState writes the record only while the stored state is one of
+	// expected, and reports whether the write happened. It is the fencing
+	// primitive that keeps a reaper or a late writer from resurrecting a query
+	// that has already reached a terminal state.
+	UpdateQueryIfState(ctx context.Context, record *domain.QueryRecord, expected ...domain.QueryState) (bool, error)
+
 	// AcquireIdempotency tries to lock a key for a dbID.
 	// Returns (existingQueryID, acquired=true, nil) if successfully acquired,
 	// or (existingQueryID, acquired=false, nil) if already locked.
 	AcquireIdempotency(ctx context.Context, dbID, key, queryID string, ttl time.Duration) (string, bool, error)
 
-	// Heartbeat registers the node's presence and updates its leased queries.
+	// ReleaseIdempotency drops a key previously acquired for queryID. It is a
+	// no-op when the key now points at a different query, so a rollback can
+	// never free somebody else's key.
+	ReleaseIdempotency(ctx context.Context, dbID, key, queryID string) error
+
+	// RefreshIdempotency re-arms the TTL of a key owned by queryID. The result
+	// retention window starts at FinishedAt, so the key has to be extended when
+	// the query finishes to stay valid for exactly as long as the result (I3).
+	RefreshIdempotency(ctx context.Context, dbID, key, queryID string, ttl time.Duration) error
+
+	// Heartbeat registers the node's presence and refreshes the lease of every
+	// owned query. Leases live in their own keys: refreshing one must never
+	// rewrite the query record itself, or a concurrent terminal write is lost.
 	Heartbeat(ctx context.Context, instanceID string, ownedQueryIDs []string, ttl time.Duration) error
+
+	// TryLock acquires a cluster-wide named lock for ttl. It returns false when
+	// the lock is already held. Used to keep periodic cluster-wide work (GC)
+	// running on a single instance at a time.
+	TryLock(ctx context.Context, name string, ttl time.Duration) (bool, error)
 
 	// PublishControl sends a control message to all nodes.
 	PublishControl(ctx context.Context, msg ControlMsg) error
@@ -65,7 +88,7 @@ type MetaStore interface {
 	ListExpiredQueries(ctx context.Context) ([]string, error)
 
 	// ListStaleQueries returns IDs of non-terminal (PENDING/RUNNING) queries whose
-	// owner instance is no longer alive (its heartbeat/lease key has expired).
+	// lease has expired, meaning no live owner is heartbeating them any more.
 	ListStaleQueries(ctx context.Context) ([]string, error)
 
 	// DeleteQuery deletes query metadata.

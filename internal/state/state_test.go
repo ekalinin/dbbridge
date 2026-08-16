@@ -124,3 +124,78 @@ func TestMemoryMetaStoreIdempotency(t *testing.T) {
 		t.Errorf("expected returned qid of existing query 'query-1'; got %q", qid2)
 	}
 }
+
+// TestMemoryMetaStoreLeaseAndFencing mirrors the Redis behaviour the manager
+// relies on: heartbeats never rewrite the record, and a conditional update is
+// refused once the record is terminal.
+func TestMemoryMetaStoreLeaseAndFencing(t *testing.T) {
+	ms := NewMemoryMetaStore()
+	defer ms.Close()
+
+	ctx := t.Context()
+	rec := &domain.QueryRecord{
+		ID: "q1", DatabaseID: "pg", OwnerInstanceID: "inst-1",
+		State: domain.StateRunning, CreatedAt: time.Now(),
+	}
+	if err := ms.PutQuery(ctx, rec); err != nil {
+		t.Fatalf("PutQuery: %v", err)
+	}
+
+	stale, err := ms.ListStaleQueries(ctx)
+	if err != nil {
+		t.Fatalf("ListStaleQueries: %v", err)
+	}
+	if len(stale) != 1 {
+		t.Errorf("ListStaleQueries = %v before any heartbeat, want [q1]", stale)
+	}
+
+	if err := ms.Heartbeat(ctx, "inst-1", []string{"q1"}, time.Minute); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	stale, err = ms.ListStaleQueries(ctx)
+	if err != nil {
+		t.Fatalf("ListStaleQueries: %v", err)
+	}
+	if len(stale) != 0 {
+		t.Errorf("ListStaleQueries = %v after a heartbeat, want none", stale)
+	}
+
+	got, err := ms.GetQuery(ctx, "q1")
+	if err != nil {
+		t.Fatalf("GetQuery: %v", err)
+	}
+	if got.LeaseDeadline.IsZero() {
+		t.Error("LeaseDeadline is zero after a heartbeat")
+	}
+
+	done := *rec
+	done.State = domain.StateSucceeded
+	done.FinishedAt = time.Now()
+	ok, err := ms.UpdateQueryIfState(ctx, &done, domain.StatePending, domain.StateRunning)
+	if err != nil || !ok {
+		t.Fatalf("UpdateQueryIfState = (%v, %v), want (true, nil)", ok, err)
+	}
+
+	reaped := *rec
+	reaped.State = domain.StateFailed
+	ok, err = ms.UpdateQueryIfState(ctx, &reaped, domain.StatePending, domain.StateRunning)
+	if err != nil {
+		t.Fatalf("UpdateQueryIfState (second): %v", err)
+	}
+	if ok {
+		t.Fatal("UpdateQueryIfState overwrote a terminal record")
+	}
+}
+
+func TestMemoryMetaStoreTryLock(t *testing.T) {
+	ms := NewMemoryMetaStore()
+	defer ms.Close()
+
+	ctx := t.Context()
+	if ok, err := ms.TryLock(ctx, "gc", time.Minute); err != nil || !ok {
+		t.Fatalf("first TryLock = (%v, %v), want (true, nil)", ok, err)
+	}
+	if ok, err := ms.TryLock(ctx, "gc", time.Minute); err != nil || ok {
+		t.Fatalf("second TryLock = (%v, %v), want (false, nil)", ok, err)
+	}
+}
