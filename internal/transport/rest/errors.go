@@ -27,7 +27,11 @@ type errorResponse struct {
 // gets the category and, for input errors, the reason.
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, message := classify(err)
-	if status >= http.StatusInternalServerError {
+	// Only the internal-error bucket is logged. A 503 from a draining instance
+	// is expected operation and would otherwise fill the log on every rolling
+	// deploy, and an unreachable database is already logged where it is
+	// detected, with the driver detail the response deliberately drops.
+	if status == http.StatusInternalServerError {
 		log.Printf("ERROR: request_id=%s %s %s: %v", middleware.GetReqID(r.Context()), r.Method, r.URL.Path, err)
 	}
 	writeStatus(w, r, status, message)

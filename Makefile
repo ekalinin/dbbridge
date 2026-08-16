@@ -54,8 +54,19 @@ test-integration:
 
 # Real backends in containers (Redis, PostgreSQL, MySQL, MinIO).
 # Requires a Docker daemon; skipped by every other target via the build tag.
+#
+# testcontainers does not read the docker CLI context, so under colima it has to
+# be told twice: DOCKER_HOST is the host-side socket it connects to, and
+# TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE is the same socket as seen *inside* the
+# VM, which is what its reaper container bind-mounts. Empty on Docker Desktop
+# and in CI, where the default socket is already correct for both.
+ifeq ($(shell docker context show 2>/dev/null),colima)
+CONTAINER_ENV := DOCKER_HOST=$(shell docker context inspect colima --format '{{.Endpoints.docker.Host}}') \
+                 TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
+endif
+
 test-containers:
-	go test -race -tags=integration ./test/integration/... -count=1 -timeout 900s
+	$(CONTAINER_ENV) go test -race -tags=integration ./test/integration/... -count=1 -timeout 900s
 
 test-e2e:
 	go test ./test/e2e/... -count=1 -timeout 300s
