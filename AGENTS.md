@@ -78,7 +78,7 @@ dbbridge is a **stateless SQL proxy** that accepts queries over REST (including 
 - **Idempotency**: Pass `Idempotency-Key` HTTP header (or `options.idempotency_key` in gRPC) to deduplicate submissions within a result TTL window.
 - **Query modes**: `mode: "sync"` blocks until terminal state; `mode: "async"` (default) returns `202 Accepted` immediately.
 - **Result formats**: `jsonl` (default), `csv`, `parquet` — controlled per-query via `result_format`, validated against a whitelist before any storage writer is opened.
-- **Authentication**: static bearer tokens from `auth.tokens` with `read` / `write` / `admin` scopes (`internal/authn`); a query is only readable by the subject that submitted it.
+- **Authentication**: static bearer tokens from `auth.tokens` with `read` / `write` / `admin` scopes; `write` implies `read`, `admin` implies both. `internal/authn` holds only the identity, the scopes and the token comparison - the chi middleware lives in `internal/transport/rest` and the Connect interceptor in `internal/transport/grpcconnect`, so the core does not link a transport. A query is only readable by the subject that submitted it.
 - **Read-only guard**: `internal/sqlguard` rejects DML and DDL before execution unless `defaults.allow_writes` is set.
 - **Graceful shutdown**: SIGTERM/SIGINT triggers draining state (new queries rejected, admission closed in the manager under the same lock that registers a query), then waits up to 30 s for in-flight queries to finish before closing HTTP servers.
 - **Config hot-reload**: `config.Manager` uses `atomic.Pointer` for lock-free reads; `QueryManager.Reload()` diffs DB pools and closes removed ones without restarting.

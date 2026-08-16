@@ -69,27 +69,34 @@ stateDiagram-v2
 ## 5. Module Contracts (Interfaces)
 
 ### 5.1 QueryService (`internal/core/service`) — transport-agnostic facade
-A single interface called by ALL three transports:
-- `StartQuery(ctx, dbID, sql, opts) (QueryRecord, error)` — I1: decouples context internally.
-- `GetStatus(ctx, id) (QueryRecord, error)` — returns record with all options.
+A single facade called by ALL three transports. The method names match the RPC
+names in §7, so a transport is a pure mapping:
+- `StartQuery(ctx, dbID, sql, opts) (*QueryRecord, error)` — I1: decouples context internally.
+- `GetQueryStatus(ctx, id) (*QueryRecord, error)` — returns record with all options.
 - `StopQuery(ctx, id) error` — cancels locally or forwards to the owner (5.5).
-- `GetStats(ctx, id) (QueryStats, error)`.
-- `OpenResult(ctx, id) (io.ReadCloser, ResultRef, error)` — stream from storage.
+- `GetQueryStats(ctx, id) (QueryStats, error)`.
+- `DownloadResult(ctx, id, offset, limit) (io.ReadCloser, ResultRef, error)` — stream from storage; the byte window backs HTTP `Range` and the gRPC offset/limit.
 - `ListDatabases(ctx) ([]DatabaseInfo, error)`.
 - `ReloadConfig(ctx) (ReloadReport, error)`.
-- `Watch(ctx, id) (<-chan QueryEvent, error)` — for WS/streams.
+- `CanIBeStopped(ctx) (bool, int, lifecycle.State)`.
+- `WatchQuery(ctx, id) (<-chan QueryEvent, error)` — for WS/streams.
+
+Every read path resolves the record first and checks its `Subject` (§9), so a
+transport never has to know about authorization.
 
 ### 5.2 DB Driver plugin (`internal/db`)
 Registry based on compile-time registration (NOT Go `plugin`):
-- `type Driver interface { Open(ctx, DSNConfig) (Pool, error) }`
-- `type Pool interface { Exec(ctx, sql) (RowStream, error); Ping(ctx) error; Close() error; Stats() PoolStats }`
-- `type RowStream interface { Columns() []ColumnMeta; Next() bool; Scan(dest...) / Row() []any; Err() error; Close() error }`
-- `func Register(engine string, d Driver)` + `init()` in each driver.
+- `type Driver interface { Open(ctx, dsn string, maxConns int) (Pool, error) }` — the DSN stays a string, which is what every supported driver already parses.
+- `type Pool interface { Exec(ctx, sql) (RowStream, error); Ping(ctx) error; Stat() PoolStat; Close() error }`
+- `type RowStream interface { Columns() ([]string, error); Next() bool; Scan(dest ...any) error; Err() error; Close() error }` — column names only: no supported driver exposes portable type metadata before the first row.
+- `func Register(engine string, d Driver)` + `init()` in each driver, plus `OpenPool(ctx, engine, dsn, maxConns)`.
 - Drivers: `postgres` (jackc/pgx), `mysql` (go-sql-driver/mysql), `clickhouse` (clickhouse-go/v2), `oracle` (godror or sijms/go-ora). Each returns a stream so that large results are not kept in memory.
 
 ### 5.3 ResultStore plugin (`internal/storage`)
-- `type ResultStore interface { Writer(ctx, ResultRef) (io.WriteCloser, error); Reader(ctx, ResultRef) (io.ReadCloser, error); Stat(ctx, ResultRef) (ResultRef, error); Delete(ctx, ResultRef) error }`
-- `func Register(name string, factory Factory)` + `init()`.
+- `type ResultStore interface { Writer(ctx, queryID, format string) (io.WriteCloser, ResultRef, error); Reader(ctx, ResultRef) (io.ReadCloser, error); Stat(ctx, ResultRef) (ResultRef, error); Delete(ctx, ResultRef) error }` — `Writer` mints the `ResultRef` rather than receiving one: only the backend knows the locator it is about to write to.
+- `func Register(name string, store ResultStore)`, called from `main` once the backend has been built from config. Registration is not `init()`-time because every backend needs configuration (a root directory, a bucket, a DSN).
+- `Close` on a `Writer` is where S3 and ClickHouse wait for the upload or commit, so its error decides whether the query succeeded (I4).
+- A backend that cannot hold every format byte for byte says so through the optional `FormatChecker { SupportsFormat(format string) bool }`, and the pair is refused at submission time. The ClickHouse backend stores rows of text, which is exact for JSONL and CSV and destroys parquet: the file came back one byte longer with its `PAR1` footer read as `AR1\n`, and its recorded checksum no longer matched.
 - Backends: `fs` (local FS/NFS), `s3` (aws-sdk-go-v2, multipart upload for large files), `clickhouse` (writing results to a system table). Backend selection is from config (default) with override in `QueryOptions`.
 
 ### 5.4 MetaStore (`internal/state`)
@@ -106,7 +113,7 @@ Query events travel the same channel (`{type: query_event, ...}`). Watchers are 
 
 `StartQuery` Algorithm:
 1. Validate `dbID` against the current config snapshot.
-2. If idempotency key is set → `AcquireIdempotency`; if occupied — return the existing `QueryRecord`.
+2. If idempotency key is set → `AcquireIdempotency` under a key namespaced by the caller's subject; if occupied — return the existing `QueryRecord`. The namespace is what keeps I3 inside a subject: a global key let a caller who guessed somebody else's key read their SQL, stats and result locator, and squat on the key for its whole TTL.
 3. Create `QueryRecord{State: PENDING, OwnerInstanceID: self}`, `PutQuery`.
 4. Register `cancel` in the local `activeRegistry[id]`.
 5. **I1:** `execCtx := context.WithTimeout(context.Background(), opts.Timeout)` (or without timeout).
@@ -245,7 +252,12 @@ connection parameters. The full text goes to the log, keyed by request ID.
 
 ## 11. Telemetry (`internal/telemetry`)
 
-OpenTelemetry SDK (metrics+traces), Prometheus exporter on `/metrics`, OTLP export. Go metrics via `runtime/metrics` (`otel` runtime instrumentation). Domain metrics: `dbbridge_queries_total{engine,state}`, `dbbridge_query_duration_seconds`, `dbbridge_inflight_queries`, `dbbridge_result_bytes_total{backend}`, `dbbridge_db_pool_*`, `dbbridge_idempotency_hits_total`. End-to-end tracing: transport → service → manager → driver/store.
+OpenTelemetry SDK (metrics+traces), Prometheus exporter on `/metrics`, OTLP export. There is one set of instruments, defined on OTel, with Prometheus and OTLP as two readers behind it: a second, parallel metrics stack means one of them is always the one nobody wired up. Go metrics come from `runtime/metrics` through the Prometheus `GoCollector` ruleset. Domain metrics: `dbbridge_queries_total{engine,state}`, `dbbridge_query_duration_seconds`, `dbbridge_inflight_queries`, `dbbridge_result_bytes_total{backend}`, `dbbridge_db_pool_stats{db_id,stat}`, `dbbridge_idempotency_hits_total`. A series appears at its first observation rather than at startup, which is how OTel reports; alerts must use `rate()` or `increase()` rather than `absent()`.
+
+Tracing runs transport → service → manager → driver/store, with one seam: I1
+detaches the execution context from the request, so the execution span cannot be
+a child of the transport span. It carries a `trace.Link` to it instead, which
+records the relationship without claiming the two share a lifetime.
 
 ## 12. Repository Structure
 
@@ -257,12 +269,12 @@ dbbridge/
   internal/authn/
   internal/config/
   internal/core/{domain,service,manager}/
-  internal/core/idempotency/
   internal/db/{registry.go, drivers/{postgres,mysql,oracle,clickhouse}}/
+  internal/ratelimit/
   internal/sqlguard/
-  internal/storage/{registry.go, backends/{fs,s3,clickhouse}}/
-  internal/state/{redis,memory}/
-  internal/transport/{rest,grpcconnect,ws}/
+  internal/storage/{registry.go, parquet.go, backends/{fs,s3,clickhouse}}/
+  internal/state/{metastore.go, redis.go, memory.go}
+  internal/transport/{rest,grpcconnect,ws,certs}/
   internal/telemetry/
   internal/lifecycle/
   configs/dbbridge.yaml
@@ -271,9 +283,23 @@ dbbridge/
   go.mod (go 1.26)
 ```
 
+Two deliberate departures from the sketch above. Idempotency has no package of
+its own: it is two MetaStore calls and a rollback inside `SubmitQuery`, and a
+package holding that would only move the sequencing away from the code that has
+to get it right. And `internal/state` is flat rather than one sub-package per
+implementation, because `redis` and `memory` implement the same interface and
+share its error values.
+
 ## 13. Stack
 
-Go 1.26; `connectrpc.com/connect` + buf; `go-chi/chi`; `coder/websocket`; `redis/go-redis/v9`; `jackc/pgx/v5`, `go-sql-driver/mysql`, `ClickHouse/clickhouse-go/v2`, `godror` (or `sijms/go-ora`); `aws/aws-sdk-go-v2`; `go.opentelemetry.io/otel` + prometheus exporter; `spf13/viper` or `knadh/koanf` for config; `testcontainers-go` for integration tests.
+Go 1.26; `connectrpc.com/connect` + buf; `go-chi/chi`; `coder/websocket`; `redis/go-redis/v9`; `jackc/pgx/v5`, `go-sql-driver/mysql`, `ClickHouse/clickhouse-go/v2`, `sijms/go-ora`; `aws/aws-sdk-go-v2`; `parquet-go/parquet-go`; `go.opentelemetry.io/otel` + prometheus exporter; `golang.org/x/time/rate`; `testcontainers-go` and `alicebob/miniredis` for tests.
+
+Config is plain `gopkg.in/yaml.v3` with `${VAR}` expansion rather than viper or
+koanf: a single file, an atomic snapshot swap and an explicit `ReloadReport` is
+the whole requirement, and neither library adds anything to it. The expansion
+walks the parsed `yaml.Node` tree and substitutes into scalars only, so a secret
+containing a quote, a backslash or a trailing newline stays data instead of
+becoming markup, and a `${VAR}` inside a comment is left alone.
 
 ## 14. Implementation Order (Phases)
 
