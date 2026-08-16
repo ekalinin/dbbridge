@@ -15,6 +15,7 @@ import (
 	"github.com/ekalinin/dbbridge/internal/core/manager"
 	"github.com/ekalinin/dbbridge/internal/core/service"
 	"github.com/ekalinin/dbbridge/internal/lifecycle"
+	"github.com/ekalinin/dbbridge/internal/ratelimit"
 	"github.com/ekalinin/dbbridge/internal/state"
 	"github.com/ekalinin/dbbridge/internal/storage"
 	clickhousestore "github.com/ekalinin/dbbridge/internal/storage/backends/clickhouse"
@@ -176,6 +177,11 @@ func main() {
 	}
 	svc.SetAuthRequired(authenticator != nil)
 
+	limiter := ratelimit.New(cfg.Server.RateLimit.RequestsPerSecond, cfg.Server.RateLimit.Burst)
+	if limiter == nil {
+		log.Print("WARNING: no request rate limit configured (server.rate_limit.requests_per_second)")
+	}
+
 	// 6. Initialize Servers
 	restServer := rest.NewServer(svc, rest.Options{
 		MaxRequestBytes:   cfg.Server.MaxRequestBytes,
@@ -184,6 +190,7 @@ func main() {
 		TrustedProxyCount: cfg.Server.TrustedProxyCount,
 		Auth:              authenticator,
 		SeparateAdmin:     cfg.Server.AdminAddr != "",
+		RateLimit:         limiter,
 	})
 	restHTTP := &http.Server{
 		Addr:    cfg.Server.RESTAddr,
@@ -199,9 +206,16 @@ func main() {
 	// Setup gRPC Connect server
 	grpcHandler := grpcconnect.NewQueryHandler(svc)
 	grpcMux := http.NewServeMux()
-	var connectOpts []connect.HandlerOption
+	var interceptors []connect.Interceptor
+	if limiter != nil {
+		interceptors = append(interceptors, grpcconnect.RateLimitInterceptor(limiter))
+	}
 	if authenticator != nil {
-		connectOpts = append(connectOpts, connect.WithInterceptors(grpcconnect.NewAuthInterceptor(authenticator)))
+		interceptors = append(interceptors, grpcconnect.NewAuthInterceptor(authenticator))
+	}
+	var connectOpts []connect.HandlerOption
+	if len(interceptors) > 0 {
+		connectOpts = append(connectOpts, connect.WithInterceptors(interceptors...))
 	}
 	path, handler := v1connect.NewQueryServiceHandler(grpcHandler, connectOpts...)
 	grpcMux.Handle(path, handler)

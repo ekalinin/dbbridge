@@ -17,6 +17,7 @@ import (
 	"github.com/ekalinin/dbbridge/internal/authn"
 	"github.com/ekalinin/dbbridge/internal/core/domain"
 	"github.com/ekalinin/dbbridge/internal/lifecycle"
+	"github.com/ekalinin/dbbridge/internal/ratelimit"
 	"github.com/ekalinin/dbbridge/internal/storage"
 	"github.com/ekalinin/dbbridge/internal/testutil"
 	"github.com/ekalinin/dbbridge/internal/transport/rest"
@@ -635,6 +636,40 @@ func TestREST_WebSocketAcceptsASubprotocolCredential(t *testing.T) {
 	// The marker comes back, the token never does.
 	if got := resp.Header.Get("Sec-WebSocket-Protocol"); got != ws.BearerSubprotocol {
 		t.Errorf("negotiated subprotocol = %q, want %q", got, ws.BearerSubprotocol)
+	}
+}
+
+// TestREST_RateLimit: the concurrency cap bounds how many queries run at once,
+// but nothing bounded how fast a caller could submit them.
+func TestREST_RateLimit(t *testing.T) {
+	svc, _ := testutil.NewService(t)
+	ts := httptest.NewServer(rest.NewServer(svc, rest.Options{
+		RateLimit: ratelimit.New(0.0001, 2),
+	}).Handler())
+	t.Cleanup(ts.Close)
+
+	statuses := make([]int, 0, 4)
+	for range 4 {
+		resp := do(t, http.MethodGet, ts.URL+"/v1/databases", "", "")
+		resp.Body.Close()
+		statuses = append(statuses, resp.StatusCode)
+	}
+
+	if statuses[0] != http.StatusOK || statuses[1] != http.StatusOK {
+		t.Errorf("requests within the burst = %v, want 200s", statuses)
+	}
+	if statuses[2] != http.StatusTooManyRequests || statuses[3] != http.StatusTooManyRequests {
+		t.Errorf("requests past the burst = %v, want 429s", statuses)
+	}
+
+	// The probes must keep answering: the kubelet calls them on a schedule and
+	// must not be starved by a noisy caller.
+	for _, path := range []string{"/healthz", "/readyz"} {
+		resp := do(t, http.MethodGet, ts.URL+path, "", "")
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s under a rate limit: status = %d, want 200", path, resp.StatusCode)
+		}
 	}
 }
 

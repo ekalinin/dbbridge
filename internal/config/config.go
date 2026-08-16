@@ -62,8 +62,17 @@ type ServerConfig struct {
 	// AdminAddr, when set, moves /metrics and /v1/admin/* to their own
 	// listener. /metrics enumerates every configured db_id and the admin
 	// routes reload the process, so neither belongs on the public port.
-	AdminAddr string    `yaml:"admin_addr"`
-	TLS       TLSConfig `yaml:"tls"`
+	AdminAddr string          `yaml:"admin_addr"`
+	TLS       TLSConfig       `yaml:"tls"`
+	RateLimit RateLimitConfig `yaml:"rate_limit"`
+}
+
+// RateLimitConfig caps the request rate of a single caller, keyed by
+// authenticated subject or, when authentication is off, by client address.
+type RateLimitConfig struct {
+	// RequestsPerSecond of 0 disables limiting.
+	RequestsPerSecond float64 `yaml:"requests_per_second"`
+	Burst             int     `yaml:"burst"`
 }
 
 // AuthConfig configures API authentication. A nil pointer means the section is

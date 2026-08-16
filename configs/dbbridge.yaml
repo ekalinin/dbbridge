@@ -23,6 +23,11 @@ server:
   trusted_proxy_count: 0
   # Browser origins allowed to open a WebSocket. Empty means same-origin only.
   ws_allowed_origins: []
+  rate_limit:
+    # Per-caller request rate, keyed by authenticated subject or client address.
+    # 0 disables it.
+    requests_per_second: 0
+    burst: 0
   tls:
     # cert_file: /etc/dbbridge/tls/tls.crt
     # key_file: /etc/dbbridge/tls/tls.key

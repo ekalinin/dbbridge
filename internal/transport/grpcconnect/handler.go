@@ -12,6 +12,7 @@ import (
 	"github.com/ekalinin/dbbridge/internal/core/service"
 	v1 "github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1"
 	"github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1/dbbridgev1connect"
+	"github.com/ekalinin/dbbridge/internal/ratelimit"
 	"github.com/ekalinin/dbbridge/internal/state"
 
 	"connectrpc.com/connect"
@@ -318,5 +319,48 @@ func mapToProtoStats(s domain.QueryStats) *v1.QueryStats {
 		StorageWriteDurationMs: s.StorageWriteDuration.Milliseconds(),
 		TotalDurationMs:        s.TotalDuration.Milliseconds(),
 		Retries:                s.Retries,
+	}
+}
+
+// RateLimitInterceptor caps how fast a single caller can issue RPCs. It is
+// keyed by peer address rather than by subject: it runs before authentication,
+// so that a caller with no valid credential still cannot hammer the endpoint.
+func RateLimitInterceptor(limiter *ratelimit.Limiter) connect.Interceptor {
+	return rateLimitInterceptor{limiter: limiter}
+}
+
+type rateLimitInterceptor struct {
+	limiter *ratelimit.Limiter
+}
+
+func (i rateLimitInterceptor) allow(peer connect.Peer) error {
+	if i.limiter.Allow("addr:" + peer.Addr) {
+		return nil
+	}
+	return connect.NewError(connect.CodeResourceExhausted, errors.New("rate limit exceeded"))
+}
+
+func (i rateLimitInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		if req.Spec().IsClient {
+			return next(ctx, req)
+		}
+		if err := i.allow(req.Peer()); err != nil {
+			return nil, err
+		}
+		return next(ctx, req)
+	}
+}
+
+func (i rateLimitInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return next
+}
+
+func (i rateLimitInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
+		if err := i.allow(conn.Peer()); err != nil {
+			return err
+		}
+		return next(ctx, conn)
 	}
 }

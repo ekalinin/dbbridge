@@ -14,6 +14,7 @@ import (
 	"github.com/ekalinin/dbbridge/internal/authn"
 	"github.com/ekalinin/dbbridge/internal/core/domain"
 	"github.com/ekalinin/dbbridge/internal/core/service"
+	"github.com/ekalinin/dbbridge/internal/ratelimit"
 	"github.com/ekalinin/dbbridge/internal/telemetry"
 	"github.com/ekalinin/dbbridge/internal/transport/ws"
 
@@ -40,6 +41,8 @@ type Options struct {
 	// SeparateAdmin moves /metrics and /v1/admin/* off the public router and
 	// onto AdminHandler.
 	SeparateAdmin bool
+	// RateLimit caps the request rate per caller. A nil Limiter disables it.
+	RateLimit *ratelimit.Limiter
 }
 
 const (
@@ -93,6 +96,25 @@ func (s *Server) AdminHandler() http.Handler {
 	return s.adminRouter
 }
 
+// rateLimit rejects a caller that is submitting faster than its budget. It runs
+// before authentication, so it is keyed by client address until an identity is
+// known; the per-subject key takes over once the auth middleware has run.
+func (s *Server) rateLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The probes are called by the kubelet on a fixed schedule and must not
+		// be able to consume a caller's budget or be starved by it.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !s.opts.RateLimit.Allow(ratelimit.KeyOf(r)) {
+			writeStatus(w, r, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // useCommonMiddleware applies the middleware every router needs. The admin
 // router used to go without it, so admin errors carried no request ID, admin
 // requests were not logged at all, and a panic there reached the client as a
@@ -109,6 +131,7 @@ func (s *Server) useCommonMiddleware(r chi.Router) {
 	}
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(s.rateLimit)
 }
 
 func (s *Server) setupRoutes() {

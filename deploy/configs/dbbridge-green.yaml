@@ -19,6 +19,9 @@ server:
   idle_timeout: 120s
   # Browser origins allowed to open a WebSocket. Empty means same-origin only.
   ws_allowed_origins: []
+  rate_limit:
+    requests_per_second: 50
+    burst: 100
   tls:
     # No certificate in the dev stack, so gRPC runs as cleartext HTTP/2. Saying
     # so explicitly keeps the startup warning off.

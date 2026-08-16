@@ -101,6 +101,8 @@ Each instance loads a single YAML config file passed via `-config`. Key options:
 | `server.request_timeout` | `60s` | Bounds ordinary routes; streams are exempt |
 | `server.ws_allowed_origins` | `[]` | Browser origins allowed to open a WebSocket; empty = same-origin |
 | `server.trusted_proxy_count` | `0` | Proxy hops in front of the service, for `X-Forwarded-For` |
+| `server.rate_limit.requests_per_second` | `0` | Per-caller request rate; 0 disables |
+| `server.rate_limit.burst` | `0` | Burst allowance for the rate limit |
 | `server.tls.cert_file` / `key_file` | unset | Serve REST, gRPC and admin over TLS |
 | `server.tls.allow_h2c` | `false` | Acknowledge cleartext HTTP/2 for gRPC when TLS is off |
 | `auth.tokens[]` | — | Static bearer tokens with `read` / `write` / `admin` scopes |

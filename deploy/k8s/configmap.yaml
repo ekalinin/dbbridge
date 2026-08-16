@@ -37,6 +37,10 @@ data:
       trusted_proxy_count: 0
       # Browser origins allowed to open a WebSocket. Empty means same-origin.
       ws_allowed_origins: []
+      rate_limit:
+        # Per-caller request rate, keyed by authenticated subject.
+        requests_per_second: 50
+        burst: 100
 
     auth:
       tokens:

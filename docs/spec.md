@@ -217,9 +217,11 @@ meaning same-origin only; because a browser cannot set request headers on a
 handshake, the credential may also be offered as the subprotocol pair
 `["dbbridge.bearer", token]`.
 
-**Limits.** `server.max_request_bytes` caps a request body and
-`defaults.max_concurrent_queries` caps concurrent executions per instance;
-both reject with `413` and `429` respectively. `ReadHeaderTimeout` and
+**Limits.** `server.max_request_bytes` caps a request body,
+`defaults.max_concurrent_queries` caps concurrent executions per instance and
+`server.rate_limit` caps the request rate of a single caller — keyed by
+authenticated subject, or by client address before an identity is known; they
+reject with `413`, `429` and `429` respectively. `ReadHeaderTimeout` and
 `IdleTimeout` bound connections that open and then stall. `ReadTimeout` and
 `WriteTimeout` are deliberately unset: they would cut off result downloads and
 WebSocket connections. A WebSocket connection holds at most 32 subscriptions.
