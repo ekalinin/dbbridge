@@ -96,3 +96,30 @@ func TestConfigDiffDatabases(t *testing.T) {
 		t.Errorf("expected Updated database to contain only db1 with 10 max conns; got %v", diff.Updated)
 	}
 }
+
+func TestNonReloadableChanges(t *testing.T) {
+	base := &Config{
+		Instance: InstanceConfig{ID: "a", MetaStore: "memory"},
+		Server:   ServerConfig{RESTAddr: ":8080"},
+	}
+
+	if got := NonReloadableChanges(base, base); len(got) != 0 {
+		t.Errorf("NonReloadableChanges on an unchanged config = %v, want none", got)
+	}
+
+	changed := *base
+	changed.Instance.ID = "b"
+	changed.Server.RESTAddr = ":9999"
+	changed.Defaults.MaxConcurrentQueries = 4
+
+	got := NonReloadableChanges(base, &changed)
+	want := []string{"instance", "server", "defaults.max_concurrent_queries"}
+	if len(got) != len(want) {
+		t.Fatalf("NonReloadableChanges = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("NonReloadableChanges[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

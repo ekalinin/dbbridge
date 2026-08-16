@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 
 	"github.com/ekalinin/dbbridge/internal/core/domain"
 	"github.com/ekalinin/dbbridge/internal/core/manager"
@@ -64,11 +65,14 @@ func (s *QueryService) DownloadResult(ctx context.Context, queryID string, offse
 	}
 
 	if rec.State != domain.StateSucceeded {
-		return nil, domain.ResultRef{}, fmt.Errorf("query %s is in state %s, cannot download results", queryID, rec.State)
+		return nil, domain.ResultRef{}, domain.ValidationError{
+			Field:  "query_id",
+			Reason: "query is in state " + string(rec.State) + ", results are only available for SUCCEEDED",
+		}
 	}
 
 	if rec.Result == nil {
-		return nil, domain.ResultRef{}, fmt.Errorf("no results associated with query %s", queryID)
+		return nil, domain.ResultRef{}, domain.NotFoundError{Resource: "result for query", ID: queryID}
 	}
 
 	store, err := storage.GetStore(rec.Result.Backend)
@@ -94,8 +98,10 @@ func (s *QueryService) ListDatabases(ctx context.Context) ([]domain.DatabaseInfo
 	// Extract databases from active configuration
 	cfg := s.qm.GetConfig()
 	databases := make([]domain.DatabaseInfo, 0, len(cfg.Databases))
+	configured := make(map[string]struct{}, len(cfg.Databases))
 
 	for _, dbCfg := range cfg.Databases {
+		configured[dbCfg.ID] = struct{}{}
 		healthy := true
 		// Verify health status by checking if we have pool
 		pool, exists := s.qm.GetPool(dbCfg.ID)
@@ -111,6 +117,24 @@ func (s *QueryService) ListDatabases(ctx context.Context) ([]domain.DatabaseInfo
 		})
 	}
 
+	// Databases that still hold retained results but were dropped from the
+	// configuration are reported as unhealthy rather than hidden: their query
+	// records and results are still downloadable (I2).
+	seen, err := s.qm.DatabasesSeen(ctx)
+	if err != nil {
+		log.Printf("ERROR: failed to list databases seen: %v", err)
+		return databases, nil
+	}
+	for _, id := range seen {
+		if id == "" {
+			continue
+		}
+		if _, ok := configured[id]; ok {
+			continue
+		}
+		databases = append(databases, domain.DatabaseInfo{ID: id, Healthy: false})
+	}
+
 	return databases, nil
 }
 
@@ -118,8 +142,12 @@ func (s *QueryService) ReloadConfig(ctx context.Context) (domain.ReloadReport, e
 	return s.qm.Reload()
 }
 
+// CanIBeStopped reports whether the orchestrator may terminate this instance.
+// The count comes from the MetaStore as well as the local registry, so a node
+// restarted under the same instance ID does not claim to be quiesced while
+// records it owns are still marked in-flight (I5, spec §9).
 func (s *QueryService) CanIBeStopped(ctx context.Context) (bool, int) {
-	inFlight := s.qm.CountInFlight()
+	inFlight := s.qm.CountInFlight(ctx)
 	return inFlight == 0, inFlight
 }
 

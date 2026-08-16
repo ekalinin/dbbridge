@@ -167,11 +167,15 @@ func main() {
 		// SIGINT or SIGTERM -> Draining & Shutdown
 		log.Printf("Received signal %v, starting graceful shutdown / draining...", sig)
 		lm.SetState(lifecycle.StateDraining)
+		// Close admission in the manager as well: the lifecycle flag is checked
+		// by the service before it calls SubmitQuery, which leaves a window in
+		// which a query can still register after the loop below sees zero (I5).
+		qm.Drain()
 
 		// Wait until all queries on this node are finished
 		shutdownDeadline := time.Now().Add(30 * time.Second)
 		for {
-			inFlight := qm.CountInFlight()
+			inFlight := qm.CountInFlight(context.Background())
 			if inFlight == 0 {
 				log.Println("0 owned active queries remaining. Safe to stop.")
 				break

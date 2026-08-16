@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/ekalinin/dbbridge/internal/core/domain"
@@ -71,14 +73,36 @@ func (w *pipeWriter) Close() error {
 	return err
 }
 
+// objectPrefix namespaces every result object. Confining reads and deletes to
+// it keeps a tampered Locator in the MetaStore from reaching other keys in the
+// bucket.
+const objectPrefix = "results/"
+
+// checkKey rejects a locator that escapes the result prefix.
+func checkKey(key string) error {
+	if !strings.HasPrefix(key, objectPrefix) {
+		return fmt.Errorf("result locator %q is outside %q", key, objectPrefix)
+	}
+	if !filepath.IsLocal(strings.TrimPrefix(key, objectPrefix)) {
+		return fmt.Errorf("result locator %q is outside %q", key, objectPrefix)
+	}
+	return nil
+}
+
 func (s *S3ResultStore) Writer(ctx context.Context, queryID string, format string) (io.WriteCloser, domain.ResultRef, error) {
-	key := fmt.Sprintf("results/%s.%s", queryID, format)
+	key := objectPrefix + fmt.Sprintf("%s.%s", queryID, format)
+	if err := checkKey(key); err != nil {
+		return nil, domain.ResultRef{}, err
+	}
 
 	pr, pw := io.Pipe()
 	pwWrapper := &pipeWriter{pw: pw}
-	// Async upload from the pipe reader
+	// Async upload from the pipe reader. The execution context is passed
+	// through so a stopped or timed-out query also aborts its upload (I1);
+	// using context.Background() here left uploads running after the query was
+	// already terminal.
 	pwWrapper.wg.Go(func() {
-		_, err := s.uploader.Upload(context.Background(), &s3.PutObjectInput{
+		_, err := s.uploader.Upload(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(s.bucket),
 			Key:    aws.String(key),
 			Body:   pr,
@@ -103,6 +127,9 @@ func (s *S3ResultStore) Writer(ctx context.Context, queryID string, format strin
 }
 
 func (s *S3ResultStore) Reader(ctx context.Context, ref domain.ResultRef) (io.ReadCloser, error) {
+	if err := checkKey(ref.Locator); err != nil {
+		return nil, err
+	}
 	output, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(ref.Locator),
@@ -114,6 +141,9 @@ func (s *S3ResultStore) Reader(ctx context.Context, ref domain.ResultRef) (io.Re
 }
 
 func (s *S3ResultStore) Stat(ctx context.Context, ref domain.ResultRef) (domain.ResultRef, error) {
+	if err := checkKey(ref.Locator); err != nil {
+		return domain.ResultRef{}, err
+	}
 	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(ref.Locator),
@@ -128,6 +158,9 @@ func (s *S3ResultStore) Stat(ctx context.Context, ref domain.ResultRef) (domain.
 }
 
 func (s *S3ResultStore) Delete(ctx context.Context, ref domain.ResultRef) error {
+	if err := checkKey(ref.Locator); err != nil {
+		return err
+	}
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(ref.Locator),

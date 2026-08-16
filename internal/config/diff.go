@@ -1,5 +1,32 @@
 package config
 
+// NonReloadableChanges lists the configuration sections that changed but cannot
+// be applied without a restart. The instance ID is captured by QueryManager at
+// construction, the MetaStore and the storage backends are built once in main,
+// the listeners are bound once, and the concurrency semaphore is sized once.
+// Reporting them as ignored is more honest than a reload that claims success
+// and silently keeps the old values (spec §8).
+func NonReloadableChanges(oldCfg, newCfg *Config) []string {
+	if oldCfg == nil || newCfg == nil {
+		return nil
+	}
+
+	var ignored []string
+	if oldCfg.Instance != newCfg.Instance {
+		ignored = append(ignored, "instance")
+	}
+	if oldCfg.Server != newCfg.Server {
+		ignored = append(ignored, "server")
+	}
+	if oldCfg.Storage != newCfg.Storage {
+		ignored = append(ignored, "storage")
+	}
+	if oldCfg.Defaults.MaxConcurrentQueries != newCfg.Defaults.MaxConcurrentQueries {
+		ignored = append(ignored, "defaults.max_concurrent_queries")
+	}
+	return ignored
+}
+
 // DatabaseDiff outlines changes in database configurations.
 type DatabaseDiff struct {
 	Added   []DatabaseConfig

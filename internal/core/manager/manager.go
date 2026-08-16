@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ekalinin/dbbridge/internal/config"
 	"github.com/ekalinin/dbbridge/internal/core/domain"
 	"github.com/ekalinin/dbbridge/internal/db"
+	"github.com/ekalinin/dbbridge/internal/sqlguard"
 	"github.com/ekalinin/dbbridge/internal/state"
 	"github.com/ekalinin/dbbridge/internal/storage"
 	"github.com/ekalinin/dbbridge/internal/telemetry"
@@ -22,6 +25,35 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+const (
+	// gcInterval is how often each instance offers to run garbage collection.
+	gcInterval = time.Minute
+	// gcBudget bounds a single GC pass, and gcLockTTL keeps it exclusive across
+	// the cluster. gcLockTTL sits between gcBudget and gcInterval so the lock
+	// always expires before the next tick and exactly one instance runs a pass.
+	gcBudget   = 45 * time.Second
+	gcLockTTL  = 50 * time.Second
+	gcLockName = "gc"
+
+	// reapBudget bounds a single owner-reaper pass.
+	reapBudget = 15 * time.Second
+
+	// terminalPersistAttempts is how many times a terminal state is retried
+	// before the query is left to the owner reaper.
+	terminalPersistAttempts = 5
+
+	// poolDrainTimeout bounds how long a replaced or removed pool waits for the
+	// queries still using it before it is closed anyway.
+	poolDrainTimeout = 2 * time.Minute
+
+	// queryCloseTimeout bounds how long Close waits for query goroutines that
+	// have already been canceled.
+	queryCloseTimeout = 10 * time.Second
+
+	// watcherBuffer is the per-subscription event buffer.
+	watcherBuffer = 20
+)
+
 type QueryEvent struct {
 	QueryID string
 	State   domain.QueryState
@@ -29,39 +61,72 @@ type QueryEvent struct {
 	Error   *domain.QueryError
 }
 
+// managedPool remembers the configuration a pool was opened with so a reload
+// can tell "unchanged" from "same ID, different DSN".
+type managedPool struct {
+	pool db.Pool
+	cfg  config.DatabaseConfig
+}
+
+// activeQuery is an entry of the local in-flight registry.
+type activeQuery struct {
+	cancel context.CancelFunc
+	dbID   string
+}
+
 type QueryManager struct {
-	cfgManager  *config.Manager
-	metaStore   state.MetaStore
-	dbPools     map[string]db.Pool
-	dbPoolsMu   sync.RWMutex
-	instanceID  string
-	activeReg   map[string]context.CancelFunc
+	cfgManager *config.Manager
+	metaStore  state.MetaStore
+	instanceID string
+
+	dbPools   map[string]*managedPool
+	dbPoolsMu sync.RWMutex
+	reloadMu  sync.Mutex // serializes reloads; pools are opened under it, not under dbPoolsMu
+
+	// activeRegMu guards both the registry and the draining flag, so admission
+	// and the drain decision are one atomic step (I5).
+	activeReg   map[string]*activeQuery
 	activeRegMu sync.RWMutex
-	watchers    map[string]map[chan QueryEvent]struct{}
-	watchersMu  sync.RWMutex
-	wg          sync.WaitGroup
-	ctx         context.Context
-	cancel      context.CancelFunc
+	draining    bool
+
+	// slots caps concurrent executions; nil means unlimited.
+	slots chan struct{}
+
+	watchers   map[string]map[chan QueryEvent]struct{}
+	watchersMu sync.Mutex
+
+	wg      sync.WaitGroup // background workers
+	queryWG sync.WaitGroup // in-flight query goroutines
+	poolWG  sync.WaitGroup // deferred pool drains
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func NewQueryManager(cfgManager *config.Manager, metaStore state.MetaStore) (*QueryManager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+	cfg := cfgManager.Get()
+
 	qm := &QueryManager{
 		cfgManager: cfgManager,
 		metaStore:  metaStore,
-		dbPools:    make(map[string]db.Pool),
-		instanceID: cfgManager.Get().Instance.ID,
-		activeReg:  make(map[string]context.CancelFunc),
+		dbPools:    make(map[string]*managedPool),
+		instanceID: cfg.Instance.ID,
+		activeReg:  make(map[string]*activeQuery),
 		watchers:   make(map[string]map[chan QueryEvent]struct{}),
 		ctx:        ctx,
 		cancel:     cancel,
 	}
+	if n := cfg.Defaults.MaxConcurrentQueries; n > 0 {
+		qm.slots = make(chan struct{}, n)
+	}
 
 	// Initialize pools from configuration
 	if err := qm.syncPools(); err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to sync database pools: %w", err)
+		log.Printf("ERROR: some database pools failed to open at startup: %v", err)
 	}
+
+	qm.recoverOrphans()
 
 	// Start background workers
 	qm.wg.Go(qm.heartbeatWorker)
@@ -72,46 +137,119 @@ func NewQueryManager(cfgManager *config.Manager, metaStore state.MetaStore) (*Qu
 	return qm, nil
 }
 
+func (qm *QueryManager) heartbeatTTL() time.Duration {
+	return qm.cfgManager.Get().Instance.HeartbeatTTL
+}
+
+// samePoolConfig reports whether a pool opened for old can keep serving new.
+func samePoolConfig(a, b config.DatabaseConfig) bool {
+	return a.Engine == b.Engine && a.DSN == b.DSN && a.MaxConns == b.MaxConns
+}
+
+// syncPools brings the live pools in line with the current configuration.
+// Pools are opened outside dbPoolsMu: db.OpenPool pings the database, and
+// holding the write lock across that call stalls every SubmitQuery and every
+// heartbeat for as long as an unreachable database takes to time out.
 func (qm *QueryManager) syncPools() error {
-	qm.dbPoolsMu.Lock()
-	defer qm.dbPoolsMu.Unlock()
+	qm.reloadMu.Lock()
+	defer qm.reloadMu.Unlock()
 
 	cfg := qm.cfgManager.Get()
-	oldPools := qm.dbPools
-	newPools := make(map[string]db.Pool)
+
+	qm.dbPoolsMu.RLock()
+	current := maps.Clone(qm.dbPools)
+	qm.dbPoolsMu.RUnlock()
+
+	next := make(map[string]*managedPool, len(cfg.Databases))
+	type retired struct {
+		id   string
+		pool db.Pool
+	}
+	var stale []retired
+	var errs []error
 
 	for _, dbCfg := range cfg.Databases {
-		// If pool exists and config hasn't changed, reuse it.
-		// For simplicity of diffing, we can use the diff utility or do it directly.
-		existing, ok := oldPools[dbCfg.ID]
-		if ok {
-			newPools[dbCfg.ID] = existing
-			delete(oldPools, dbCfg.ID) // keep only removed/updated ones in oldPools to close later
-		} else {
-			pool, err := db.OpenPool(qm.ctx, dbCfg.Engine, dbCfg.DSN, dbCfg.MaxConns)
-			if err != nil {
-				// Log but do not fail hard, database might be temporarily down
-				log.Printf("ERROR: Failed to open pool for database %s: %v", dbCfg.ID, err)
+		existing, hadExisting := current[dbCfg.ID]
+		if hadExisting {
+			delete(current, dbCfg.ID)
+			if samePoolConfig(existing.cfg, dbCfg) {
+				next[dbCfg.ID] = existing
 				continue
 			}
-			newPools[dbCfg.ID] = pool
+		}
+
+		pool, err := db.OpenPool(qm.ctx, dbCfg.Engine, dbCfg.DSN, dbCfg.MaxConns)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("database %s: %w", dbCfg.ID, err))
+			// Keep serving from the previous pool rather than dropping the
+			// database entirely because its replacement could not be opened.
+			if hadExisting {
+				next[dbCfg.ID] = existing
+			}
+			continue
+		}
+		next[dbCfg.ID] = &managedPool{pool: pool, cfg: dbCfg}
+		if hadExisting {
+			stale = append(stale, retired{dbCfg.ID, existing.pool})
 		}
 	}
 
-	// Close old pools that were removed or need recreate
-	for id, pool := range oldPools {
-		log.Printf("Closing database pool %s", id)
+	// Whatever is left in current was removed from the configuration.
+	for id, mp := range current {
+		stale = append(stale, retired{id, mp.pool})
+	}
+
+	qm.dbPoolsMu.Lock()
+	qm.dbPools = next
+	qm.dbPoolsMu.Unlock()
+
+	for _, r := range stale {
+		qm.closePoolWhenIdle(r.id, r.pool)
+	}
+
+	return errors.Join(errs...)
+}
+
+// closePoolWhenIdle drains a pool that a reload replaced or removed: it waits
+// for the queries still using it to finish before closing (spec §8), and gives
+// up after poolDrainTimeout so one stuck query cannot leak a pool for ever.
+func (qm *QueryManager) closePoolWhenIdle(dbID string, pool db.Pool) {
+	qm.poolWG.Go(func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		deadline := time.Now().Add(poolDrainTimeout)
+
+	drain:
+		for qm.activeForDB(dbID) > 0 && time.Now().Before(deadline) {
+			select {
+			case <-qm.ctx.Done():
+				break drain
+			case <-ticker.C:
+			}
+		}
+
+		log.Printf("Closing database pool %s", dbID)
 		if err := pool.Close(); err != nil {
-			log.Printf("ERROR: failed to close database pool %s: %v", id, err)
+			log.Printf("ERROR: failed to close database pool %s: %v", dbID, err)
+		}
+	})
+}
+
+func (qm *QueryManager) activeForDB(dbID string) int {
+	qm.activeRegMu.RLock()
+	defer qm.activeRegMu.RUnlock()
+	n := 0
+	for _, aq := range qm.activeReg {
+		if aq.dbID == dbID {
+			n++
 		}
 	}
-
-	qm.dbPools = newPools
-	return nil
+	return n
 }
 
 // Reload reloads the configuration and updates DB connection pools dynamically.
-// It returns a ReloadReport summarizing which databases were added/removed/updated.
+// It returns a ReloadReport summarizing which databases were added/removed/updated,
+// which sections were ignored, and which pools failed to open.
 func (qm *QueryManager) Reload() (domain.ReloadReport, error) {
 	oldCfg := qm.cfgManager.Get()
 	if err := qm.cfgManager.Reload(); err != nil {
@@ -124,9 +262,11 @@ func (qm *QueryManager) Reload() (domain.ReloadReport, error) {
 		Added:   dbIDs(diff.Added),
 		Removed: dbIDs(diff.Removed),
 		Updated: dbIDs(diff.Updated),
+		Ignored: config.NonReloadableChanges(oldCfg, newCfg),
 	}
 
 	if err := qm.syncPools(); err != nil {
+		report.Failures = strings.Split(err.Error(), "\n")
 		return report, err
 	}
 	return report, nil
@@ -140,25 +280,29 @@ func dbIDs(dbs []config.DatabaseConfig) []string {
 	return ids
 }
 
-func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string, opts domain.QueryOptions) (*domain.QueryRecord, error) {
+func (qm *QueryManager) lookupPool(dbID string) (db.Pool, bool) {
 	qm.dbPoolsMu.RLock()
-	pool, exists := qm.dbPools[dbID]
-	qm.dbPoolsMu.RUnlock()
-	if !exists {
-		return nil, fmt.Errorf("database %s not configured or pool initialization failed", dbID)
+	defer qm.dbPoolsMu.RUnlock()
+	mp, ok := qm.dbPools[dbID]
+	if !ok {
+		return nil, false
 	}
+	return mp.pool, true
+}
 
-	// Ping database to make sure it is ready
-	if err := pool.Ping(ctx); err != nil {
-		return nil, fmt.Errorf("database %s is unreachable: %w", dbID, err)
-	}
-
-	queryID := uuid.New().String()
-
-	// Apply defaults before idempotency check so the TTL is correct.
+// applyDefaults fills in the server-side defaults for options the client left
+// unset. It runs before validation so a missing mode is stored as "async"
+// rather than as an empty string.
+func (qm *QueryManager) applyDefaults(opts domain.QueryOptions) domain.QueryOptions {
 	cfg := qm.cfgManager.Get()
+	if opts.Mode == "" {
+		opts.Mode = "async"
+	}
 	if opts.ResultTTL == 0 {
 		opts.ResultTTL = cfg.Defaults.ResultTTL
+	}
+	if opts.Timeout == 0 {
+		opts.Timeout = cfg.Defaults.QueryTimeout
 	}
 	if opts.ResultFormat == "" {
 		opts.ResultFormat = "jsonl"
@@ -166,18 +310,94 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 	if opts.StorageBackend == "" {
 		opts.StorageBackend = cfg.Instance.DefaultStorage
 	}
+	return opts
+}
 
-	// Handle Idempotency
+// idempotencySubmitTTL covers execution plus the retention window. The key is
+// re-armed against FinishedAt once the query finishes (see complete).
+func idempotencySubmitTTL(opts domain.QueryOptions) time.Duration {
+	return opts.ResultTTL + 24*time.Hour
+}
+
+func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string, opts domain.QueryOptions) (*domain.QueryRecord, error) {
+	pool, exists := qm.lookupPool(dbID)
+	if !exists {
+		return nil, domain.NotFoundError{Resource: "database", ID: dbID}
+	}
+
+	// Everything that can reject the request runs before the first side effect:
+	// no idempotency key is burned and no storage file is created for a request
+	// that was never going to be accepted.
+	opts = qm.applyDefaults(opts)
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
+	if _, err := storage.GetStore(opts.StorageBackend); err != nil {
+		return nil, domain.ValidationError{Field: "storage_backend", Reason: "unknown storage backend"}
+	}
+	if !qm.cfgManager.Get().Defaults.AllowWrites {
+		if err := sqlguard.ReadOnly(sql); err != nil {
+			return nil, domain.ValidationError{Field: "sql", Reason: err.Error()}
+		}
+	}
+
+	queryID := uuid.New().String()
+
+	// Idempotency is resolved before Ping: a repeated submission has to return
+	// the same query ID even while the database is temporarily unreachable (I3).
 	if opts.IdempotencyKey != "" {
-		existingID, acquired, err := qm.metaStore.AcquireIdempotency(ctx, dbID, opts.IdempotencyKey, queryID, opts.ResultTTL)
+		existing, err := qm.resolveIdempotency(ctx, dbID, opts, queryID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to process idempotency: %w", err)
+			return nil, err
 		}
-		if !acquired {
-			log.Printf("Idempotency match! Returning existing query ID %s", existingID)
+		if existing != nil {
 			telemetry.RecordIdempotencyHit()
-			return qm.GetQuery(ctx, existingID)
+			return existing, nil
 		}
+	}
+
+	// From here on every failure has to undo the idempotency claim, otherwise
+	// the key outlives the query it points at and blocks every retry.
+	release := func() {
+		if opts.IdempotencyKey == "" {
+			return
+		}
+		if err := qm.metaStore.ReleaseIdempotency(context.WithoutCancel(ctx), dbID, opts.IdempotencyKey, queryID); err != nil {
+			log.Printf("ERROR: failed to release idempotency key for query %s: %v", queryID, err)
+		}
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		release()
+		// The driver error carries the DSN (host, user, parameters); it belongs
+		// in the log, never in the response.
+		log.Printf("ERROR: database %s is unreachable: %v", dbID, err)
+		return nil, domain.UnavailableError{Resource: "database " + dbID}
+	}
+
+	if !qm.acquireSlot() {
+		release()
+		return nil, domain.ResourceExhaustedError{Reason: "too many concurrent queries on this instance"}
+	}
+
+	// Setup execution context (I1: decoupled from the caller's context).
+	var execCtx context.Context
+	var cancelExec context.CancelFunc
+	if opts.Timeout > 0 {
+		execCtx, cancelExec = context.WithTimeout(context.Background(), opts.Timeout)
+	} else {
+		execCtx, cancelExec = context.WithCancel(context.Background())
+	}
+
+	// Registration is the admission gate: it rejects the query if the instance
+	// went into drain, in the same critical section that Drain() uses. Checking
+	// draining separately from registering let a query slip in after the drain
+	// loop had already observed zero in-flight queries (I5).
+	if err := qm.admit(queryID, dbID, cancelExec); err != nil {
+		cancelExec()
+		qm.releaseSlot()
+		release()
+		return nil, err
 	}
 
 	record := &domain.QueryRecord{
@@ -188,24 +408,22 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 		State:           domain.StatePending,
 		OwnerInstanceID: qm.instanceID,
 		CreatedAt:       time.Now(),
+		IdempotencyKey:  opts.IdempotencyKey,
 	}
 
 	if err := qm.metaStore.PutQuery(ctx, record); err != nil {
+		qm.deregister(queryID)
+		cancelExec()
+		qm.releaseSlot()
+		release()
 		return nil, fmt.Errorf("failed to persist query state: %w", err)
 	}
 
-	// Setup execution context
-	var execCtx context.Context
-	var cancelExec context.CancelFunc
-	if opts.Timeout > 0 {
-		execCtx, cancelExec = context.WithTimeout(context.Background(), opts.Timeout)
-	} else {
-		execCtx, cancelExec = context.WithCancel(context.Background())
+	// Claim the lease straight away so another instance's reaper cannot see a
+	// brand-new query as ownerless before the first heartbeat tick.
+	if err := qm.metaStore.Heartbeat(ctx, qm.instanceID, []string{queryID}, qm.heartbeatTTL()); err != nil {
+		log.Printf("ERROR: failed to claim lease for query %s: %v", queryID, err)
 	}
-
-	qm.activeRegMu.Lock()
-	qm.activeReg[queryID] = cancelExec
-	qm.activeRegMu.Unlock()
 
 	qm.notifyWatchers(QueryEvent{
 		QueryID: queryID,
@@ -228,8 +446,8 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 		syncCh = ch
 	}
 
-	// Async execution
-	go qm.run(execCtx, record, pool, cancelExec)
+	// Async execution. The goroutine is tracked so shutdown can wait for it.
+	qm.queryWG.Go(func() { qm.run(execCtx, record, pool, cancelExec) })
 
 	if opts.Mode == "sync" {
 		// Wait for execution to finish
@@ -247,13 +465,100 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 	return &asyncSnapshot, nil
 }
 
+// resolveIdempotency claims the key for queryID. It returns a non-nil record
+// when the key is already held by a live query, which the caller returns as is.
+func (qm *QueryManager) resolveIdempotency(ctx context.Context, dbID string, opts domain.QueryOptions, queryID string) (*domain.QueryRecord, error) {
+	ttl := idempotencySubmitTTL(opts)
+
+	existingID, acquired, err := qm.metaStore.AcquireIdempotency(ctx, dbID, opts.IdempotencyKey, queryID, ttl)
+	if err != nil {
+		return nil, fmt.Errorf("failed to process idempotency: %w", err)
+	}
+	if acquired {
+		return nil, nil
+	}
+
+	rec, err := qm.metaStore.GetQuery(ctx, existingID)
+	if err == nil {
+		log.Printf("Idempotency match! Returning existing query ID %s", existingID)
+		return rec, nil
+	}
+	if !errors.Is(err, state.ErrNotFound) {
+		return nil, err
+	}
+
+	// The key outlived the record it pointed at (GC removed it, or an older
+	// build failed to roll the key back). Reclaim it instead of refusing the
+	// query for the rest of the TTL.
+	log.Printf("Idempotency key for database %s points at missing query %s; reclaiming", dbID, existingID)
+	if err := qm.metaStore.ReleaseIdempotency(ctx, dbID, opts.IdempotencyKey, existingID); err != nil {
+		return nil, fmt.Errorf("failed to reclaim idempotency key: %w", err)
+	}
+	existingID, acquired, err = qm.metaStore.AcquireIdempotency(ctx, dbID, opts.IdempotencyKey, queryID, ttl)
+	if err != nil {
+		return nil, fmt.Errorf("failed to process idempotency: %w", err)
+	}
+	if acquired {
+		return nil, nil
+	}
+	return qm.metaStore.GetQuery(ctx, existingID)
+}
+
+// admit registers a query in the local in-flight registry unless the instance
+// is draining.
+func (qm *QueryManager) admit(queryID, dbID string, cancel context.CancelFunc) error {
+	qm.activeRegMu.Lock()
+	defer qm.activeRegMu.Unlock()
+	if qm.draining {
+		return domain.DrainingError{}
+	}
+	qm.activeReg[queryID] = &activeQuery{cancel: cancel, dbID: dbID}
+	return nil
+}
+
+func (qm *QueryManager) deregister(queryID string) {
+	qm.activeRegMu.Lock()
+	defer qm.activeRegMu.Unlock()
+	delete(qm.activeReg, queryID)
+}
+
+func (qm *QueryManager) acquireSlot() bool {
+	if qm.slots == nil {
+		return true
+	}
+	select {
+	case qm.slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (qm *QueryManager) releaseSlot() {
+	if qm.slots == nil {
+		return
+	}
+	select {
+	case <-qm.slots:
+	default:
+	}
+}
+
+// Drain closes admission. Once it returns, no further query can enter the local
+// registry, so a subsequent CountInFlight of zero really means quiesced (I5).
+func (qm *QueryManager) Drain() {
+	qm.activeRegMu.Lock()
+	defer qm.activeRegMu.Unlock()
+	qm.draining = true
+}
+
 func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, pool db.Pool, cancelExec context.CancelFunc) {
+	// LIFO: the registry entry is dropped only after the terminal state has been
+	// persisted, which keeps the lease alive across the retries and keeps the
+	// owner reaper away from a query that is merely slow to record its result.
 	defer cancelExec()
-	defer func() {
-		qm.activeRegMu.Lock()
-		delete(qm.activeReg, record.ID)
-		qm.activeRegMu.Unlock()
-	}()
+	defer qm.releaseSlot()
+	defer qm.deregister(record.ID)
 
 	ctx, span := otel.Tracer("dbbridge").Start(ctx, "query.run",
 		trace.WithAttributes(
@@ -265,10 +570,15 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	startTime := time.Now()
 
 	// Update to RUNNING
+	if !record.State.CanTransitionTo(domain.StateRunning) {
+		log.Printf("ERROR: refusing transition %s -> RUNNING for query %s", record.State, record.ID)
+		return
+	}
 	record.State = domain.StateRunning
 	record.StartedAt = startTime
-	record.LeaseDeadline = time.Now().Add(qm.cfgManager.Get().Instance.HeartbeatTTL)
-	if err := qm.metaStore.PutQuery(context.Background(), record); err != nil {
+	if err := qm.persist(record, terminalPersistAttempts); err != nil {
+		// Not fatal on its own: the terminal write below is the one that must
+		// land, and it is retried separately.
 		log.Printf("ERROR: failed to persist RUNNING state for query %s: %v", record.ID, err)
 	}
 	qm.notifyWatchers(QueryEvent{QueryID: record.ID, State: domain.StateRunning})
@@ -280,11 +590,8 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	dbDuration := time.Since(dbStart)
 
 	if err != nil {
-		qm.finishWithError(record, &domain.QueryError{
-			Code:      "DB_EXEC_FAILED",
-			Message:   err.Error(),
-			Retryable: false, // customizable based on error
-		}, dbDuration, 0)
+		nextState, qErr := terminalFor(ctx, err, domain.ErrCodeDBExecFailed)
+		qm.finishRun(record, nextState, qErr, dbDuration, 0)
 		return
 	}
 	defer func() {
@@ -296,46 +603,40 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	// Initialize Result Store Writer
 	store, err := storage.GetStore(record.Options.StorageBackend)
 	if err != nil {
-		qm.finishWithError(record, &domain.QueryError{
-			Code:    "STORAGE_INIT_FAILED",
-			Message: err.Error(),
-		}, dbDuration, 0)
+		qm.finishRun(record, domain.StateFailed,
+			domain.NewQueryError(domain.ErrCodeStorageInitFailed, err.Error(), false), dbDuration, 0)
 		return
 	}
 
-	storeCtx, storeCancel := context.WithCancel(context.Background())
-	defer storeCancel()
-
-	writer, ref, err := store.Writer(storeCtx, record.ID, record.Options.ResultFormat)
+	// The execution context is handed to the writer so a stopped or timed-out
+	// query also aborts its upload. A private context.Background() here left S3
+	// uploads running for queries that were already terminal.
+	writer, ref, err := store.Writer(ctx, record.ID, record.Options.ResultFormat)
 	if err != nil {
-		qm.finishWithError(record, &domain.QueryError{
-			Code:    "STORAGE_WRITER_FAILED",
-			Message: err.Error(),
-		}, dbDuration, 0)
+		qm.finishRun(record, domain.StateFailed,
+			domain.NewQueryError(domain.ErrCodeStorageWriterFailed, err.Error(), false), dbDuration, 0)
 		return
 	}
 
 	// Stream and Persist Rows
 	storeStart := time.Now()
-	rowsCount, bytesWritten, err := storage.EncodeStream(ctx, rowsStream, record.Options.ResultFormat, writer)
-	if cerr := writer.Close(); cerr != nil {
-		log.Printf("ERROR: failed to close result writer for query %s: %v", record.ID, cerr)
-	}
+	rowsCount, bytesWritten, encErr := storage.EncodeStream(ctx, rowsStream, record.Options.ResultFormat, writer)
+	// Close is where S3 and ClickHouse wait for the upload/commit and surface
+	// its error, so its result decides whether the query really succeeded (I4).
+	closeErr := writer.Close()
 	storeDuration := time.Since(storeStart)
 
-	if err != nil {
-		// If execution was canceled
-		if errors.Is(err, context.Canceled) {
-			deletePartial(store, ref, record.ID)
-			qm.finishWithCancel(record, dbDuration, storeDuration)
-			return
-		}
-
+	if encErr != nil {
 		deletePartial(store, ref, record.ID)
-		qm.finishWithError(record, &domain.QueryError{
-			Code:    "STREAM_ENCODE_FAILED",
-			Message: err.Error(),
-		}, dbDuration, storeDuration)
+		nextState, qErr := terminalFor(ctx, encErr, domain.ErrCodeStreamEncodeFailed)
+		qm.finishRun(record, nextState, qErr, dbDuration, storeDuration)
+		return
+	}
+
+	if closeErr != nil {
+		deletePartial(store, ref, record.ID)
+		nextState, qErr := terminalFor(ctx, closeErr, domain.ErrCodeStorageFinalizeFailed)
+		qm.finishRun(record, nextState, qErr, dbDuration, storeDuration)
 		return
 	}
 
@@ -343,74 +644,119 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	ref.SizeBytes = bytesWritten
 	ref.RowCount = rowsCount
 
-	record.State = domain.StateSucceeded
-	record.FinishedAt = time.Now()
 	record.Result = &ref
-	record.Stats = domain.QueryStats{
-		RowsRead:             rowsCount,
-		BytesWritten:         bytesWritten,
-		DBExecDuration:       dbDuration,
-		StorageWriteDuration: storeDuration,
-		TotalDuration:        time.Since(startTime),
-	}
+	record.Stats.RowsRead = rowsCount
+	record.Stats.BytesWritten = bytesWritten
+	record.Stats.TotalDuration = time.Since(startTime)
 
-	if err := qm.metaStore.PutQuery(context.Background(), record); err != nil {
-		log.Printf("ERROR: failed to persist SUCCEEDED state for query %s: %v", record.ID, err)
-	}
-	qm.notifyWatchers(QueryEvent{
-		QueryID: record.ID,
-		State:   domain.StateSucceeded,
-		Stats:   record.Stats,
-	})
-
-	engine := qm.getEngine(record.DatabaseID)
-	telemetry.RecordQueryFinished()
-	telemetry.RecordQueryCompleted(engine, string(domain.StateSucceeded), record.Stats.TotalDuration)
+	qm.finishRun(record, domain.StateSucceeded, nil, dbDuration, storeDuration)
 	telemetry.RecordResultBytes(ref.Backend, bytesWritten)
 }
 
-func (qm *QueryManager) finishWithError(rec *domain.QueryRecord, qErr *domain.QueryError, dbDur, storeDur time.Duration) {
-	rec.State = domain.StateFailed
-	rec.FinishedAt = time.Now()
+// terminalFor maps an execution failure to the terminal state the state machine
+// asks for: an explicit stop is CANCELED, an expired deadline is a FAILED with
+// its own code, anything else keeps the caller's code. The context is consulted
+// as well because drivers wrap or replace the cancellation error.
+func terminalFor(ctx context.Context, err error, fallback domain.QueryErrorCode) (domain.QueryState, *domain.QueryError) {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(ctx.Err(), context.Canceled):
+		return domain.StateCanceled, nil
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return domain.StateFailed, domain.NewQueryError(domain.ErrCodeQueryTimeout, "query exceeded its timeout", true)
+	default:
+		return domain.StateFailed, domain.NewQueryError(fallback, err.Error(), false)
+	}
+}
+
+// finishRun applies a terminal transition from inside run() and records the
+// telemetry that pairs with RecordQueryStarted.
+func (qm *QueryManager) finishRun(rec *domain.QueryRecord, next domain.QueryState, qErr *domain.QueryError, dbDur, storeDur time.Duration) {
 	rec.Error = qErr
 	rec.Stats.DBExecDuration = dbDur
 	rec.Stats.StorageWriteDuration = storeDur
-	rec.Stats.TotalDuration = time.Since(rec.CreatedAt)
-
-	if err := qm.metaStore.PutQuery(context.Background(), rec); err != nil {
-		log.Printf("ERROR: failed to persist FAILED state for query %s: %v", rec.ID, err)
+	if rec.Stats.TotalDuration == 0 {
+		rec.Stats.TotalDuration = time.Since(rec.CreatedAt)
 	}
-	qm.notifyWatchers(QueryEvent{
-		QueryID: rec.ID,
-		State:   domain.StateFailed,
-		Error:   qErr,
-		Stats:   rec.Stats,
-	})
 
-	engine := qm.getEngine(rec.DatabaseID)
+	if !qm.complete(rec, next) {
+		return
+	}
+
 	telemetry.RecordQueryFinished()
-	telemetry.RecordQueryCompleted(engine, string(domain.StateFailed), rec.Stats.TotalDuration)
+	telemetry.RecordQueryCompleted(qm.getEngine(rec.DatabaseID), string(next), rec.Stats.TotalDuration)
 }
 
-func (qm *QueryManager) finishWithCancel(rec *domain.QueryRecord, dbDur, storeDur time.Duration) {
-	rec.State = domain.StateCanceled
-	rec.FinishedAt = time.Now()
-	rec.Stats.DBExecDuration = dbDur
-	rec.Stats.StorageWriteDuration = storeDur
-	rec.Stats.TotalDuration = time.Since(rec.CreatedAt)
-
-	if err := qm.metaStore.PutQuery(context.Background(), rec); err != nil {
-		log.Printf("ERROR: failed to persist CANCELED state for query %s: %v", rec.ID, err)
+// complete performs a terminal transition on a record: it enforces the state
+// machine, persists with retries, re-arms the idempotency key against the
+// retention window and notifies watchers. It reports whether the transition was
+// applied.
+func (qm *QueryManager) complete(rec *domain.QueryRecord, next domain.QueryState) bool {
+	if !rec.State.CanTransitionTo(next) {
+		log.Printf("ERROR: refusing transition %s -> %s for query %s", rec.State, next, rec.ID)
+		return false
 	}
+
+	rec.State = next
+	rec.FinishedAt = time.Now()
+
+	if err := qm.persist(rec, terminalPersistAttempts); err != nil {
+		// The lease stops being refreshed once run() deregisters the query, so
+		// the owner reaper on this or another instance eventually fails it. That
+		// is the honest outcome: better a FAILED record than one stuck in
+		// RUNNING for ever.
+		log.Printf("ERROR: gave up persisting %s for query %s, leaving it to the owner reaper: %v", next, rec.ID, err)
+	}
+
+	// Retention is measured from FinishedAt, so the key acquired at submission
+	// time is re-armed here to expire together with the result (I3).
+	if rec.IdempotencyKey != "" && rec.Options.ResultTTL > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := qm.metaStore.RefreshIdempotency(ctx, rec.DatabaseID, rec.IdempotencyKey, rec.ID, rec.Options.ResultTTL); err != nil {
+			log.Printf("ERROR: failed to align idempotency TTL for query %s: %v", rec.ID, err)
+		}
+		cancel()
+	}
+
 	qm.notifyWatchers(QueryEvent{
 		QueryID: rec.ID,
-		State:   domain.StateCanceled,
+		State:   next,
 		Stats:   rec.Stats,
+		Error:   rec.Error,
 	})
+	return true
+}
 
-	engine := qm.getEngine(rec.DatabaseID)
-	telemetry.RecordQueryFinished()
-	telemetry.RecordQueryCompleted(engine, string(domain.StateCanceled), rec.Stats.TotalDuration)
+// persist writes the record to the MetaStore, retrying with backoff. A dropped
+// terminal write leaves readers on other instances looking at RUNNING for a
+// query that already produced its result (I2, I4), so it is worth retrying
+// instead of being logged once and forgotten.
+func (qm *QueryManager) persist(rec *domain.QueryRecord, attempts int) error {
+	backoff := 200 * time.Millisecond
+	var lastErr error
+
+	for attempt := 1; attempt <= attempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := qm.metaStore.PutQuery(ctx, rec)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		log.Printf("ERROR: failed to persist %s state for query %s (attempt %d/%d): %v",
+			rec.State, rec.ID, attempt, attempts, err)
+
+		if attempt == attempts {
+			break
+		}
+		select {
+		case <-qm.ctx.Done():
+			return lastErr
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+
+	return lastErr
 }
 
 func (qm *QueryManager) GetQuery(ctx context.Context, queryID string) (*domain.QueryRecord, error) {
@@ -428,11 +774,11 @@ func (qm *QueryManager) StopQuery(ctx context.Context, queryID string) error {
 	}
 
 	if record.OwnerInstanceID == qm.instanceID {
-		qm.activeRegMu.Lock()
-		cancel, exists := qm.activeReg[queryID]
-		qm.activeRegMu.Unlock()
+		qm.activeRegMu.RLock()
+		aq, exists := qm.activeReg[queryID]
+		qm.activeRegMu.RUnlock()
 		if exists {
-			cancel()
+			aq.cancel()
 			return nil
 		}
 	}
@@ -445,14 +791,40 @@ func (qm *QueryManager) StopQuery(ctx context.Context, queryID string) error {
 	})
 }
 
-func (qm *QueryManager) CountInFlight() int {
+// CountInFlight reports the owned queries still in flight. It takes the larger
+// of the local registry and the MetaStore's view: after a restart under the
+// same instance ID the registry is empty while records owned by this ID are
+// still marked active, and reporting zero there would let an orchestrator stop
+// a node that has not quiesced (I5, spec §9).
+func (qm *QueryManager) CountInFlight(ctx context.Context) int {
 	qm.activeRegMu.RLock()
-	defer qm.activeRegMu.RUnlock()
-	return len(qm.activeReg)
+	local := len(qm.activeReg)
+	qm.activeRegMu.RUnlock()
+
+	remote, err := qm.metaStore.CountInFlight(ctx, qm.instanceID)
+	if err != nil {
+		log.Printf("ERROR: failed to count in-flight queries in the MetaStore: %v", err)
+		return local
+	}
+	return max(local, remote)
 }
 
 func (qm *QueryManager) Watch(ctx context.Context, queryID string) (<-chan QueryEvent, error) {
-	ch := make(chan QueryEvent, 20)
+	// A watch on an unknown ID used to block for ever. Resolving the record
+	// first also gives the subscriber the current state, so a subscription that
+	// arrives after the query finished terminates instead of waiting.
+	rec, err := qm.metaStore.GetQuery(ctx, queryID)
+	if err != nil {
+		return nil, err
+	}
+
+	ch := make(chan QueryEvent, watcherBuffer)
+	current := QueryEvent{
+		QueryID: queryID,
+		State:   rec.State,
+		Stats:   rec.Stats,
+		Error:   rec.Error,
+	}
 
 	qm.watchersMu.Lock()
 	subs, ok := qm.watchers[queryID]
@@ -461,7 +833,16 @@ func (qm *QueryManager) Watch(ctx context.Context, queryID string) (<-chan Query
 		qm.watchers[queryID] = subs
 	}
 	subs[ch] = struct{}{}
+	ch <- current
+	terminal := rec.State.IsTerminal()
+	if terminal {
+		qm.dropWatcherLocked(queryID, ch)
+	}
 	qm.watchersMu.Unlock()
+
+	if terminal {
+		return ch, nil
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -471,13 +852,10 @@ func (qm *QueryManager) Watch(ctx context.Context, queryID string) (<-chan Query
 	return ch, nil
 }
 
-// unwatch drops the subscription and closes its channel. Both happen under the
-// write lock, which notifyWatchers holds for reading while it sends, so a
-// channel can never be closed with a send in flight.
-func (qm *QueryManager) unwatch(queryID string, ch chan QueryEvent) {
-	qm.watchersMu.Lock()
-	defer qm.watchersMu.Unlock()
-
+// dropWatcherLocked removes a subscription and closes its channel. Callers must
+// hold watchersMu, which notifyWatchers also holds while it sends, so a channel
+// can never be closed with a send in flight.
+func (qm *QueryManager) dropWatcherLocked(queryID string, ch chan QueryEvent) {
 	subs, ok := qm.watchers[queryID]
 	if !ok {
 		return
@@ -493,12 +871,15 @@ func (qm *QueryManager) unwatch(queryID string, ch chan QueryEvent) {
 	close(ch)
 }
 
+func (qm *QueryManager) unwatch(queryID string, ch chan QueryEvent) {
+	qm.watchersMu.Lock()
+	defer qm.watchersMu.Unlock()
+	qm.dropWatcherLocked(queryID, ch)
+}
+
 func (qm *QueryManager) notifyWatchers(ev QueryEvent) {
-	// The read lock is held across the sends, not just around the lookup: it is
-	// what keeps unwatch from closing a channel mid-send. The sends are
-	// non-blocking, so the critical section stays bounded.
-	qm.watchersMu.RLock()
-	defer qm.watchersMu.RUnlock()
+	qm.watchersMu.Lock()
+	defer qm.watchersMu.Unlock()
 
 	for ch := range qm.watchers[ev.QueryID] {
 		select {
@@ -506,13 +887,19 @@ func (qm *QueryManager) notifyWatchers(ev QueryEvent) {
 		default:
 			// Non-blocking write to avoid blocking during notifications
 		}
+		// A terminal state is the last event a query can produce; closing the
+		// subscription here is what lets a WebSocket or gRPC stream end instead
+		// of waiting for a client timeout.
+		if ev.State.IsTerminal() {
+			qm.dropWatcherLocked(ev.QueryID, ch)
+		}
 	}
 }
 
 // Background workers
 
 func (qm *QueryManager) heartbeatWorker() {
-	ticker := time.NewTicker(qm.cfgManager.Get().Instance.HeartbeatTTL / 2)
+	ticker := time.NewTicker(qm.heartbeatTTL() / 2)
 	defer ticker.Stop()
 
 	for {
@@ -521,20 +908,17 @@ func (qm *QueryManager) heartbeatWorker() {
 			return
 		case <-ticker.C:
 			qm.activeRegMu.RLock()
-			activeIDs := make([]string, 0, len(qm.activeReg))
-			for id := range qm.activeReg {
-				activeIDs = append(activeIDs, id)
-			}
+			activeIDs := slices.Collect(maps.Keys(qm.activeReg))
 			qm.activeRegMu.RUnlock()
 
-			ttl := qm.cfgManager.Get().Instance.HeartbeatTTL
+			ttl := qm.heartbeatTTL()
 			if err := qm.metaStore.Heartbeat(qm.ctx, qm.instanceID, activeIDs, ttl); err != nil {
 				log.Printf("ERROR: MetaStore Heartbeat failed: %v", err)
 			}
 
 			qm.dbPoolsMu.RLock()
-			for dbID, pool := range qm.dbPools {
-				s := pool.Stat()
+			for dbID, mp := range qm.dbPools {
+				s := mp.pool.Stat()
 				telemetry.RecordPoolStat(dbID, s.Open, s.Idle, s.InUse)
 			}
 			qm.dbPoolsMu.RUnlock()
@@ -558,12 +942,12 @@ func (qm *QueryManager) controlWorker() {
 				return
 			}
 			if msg.Type == state.ControlStopQuery {
-				qm.activeRegMu.Lock()
-				cancel, ok := qm.activeReg[msg.QueryID]
-				qm.activeRegMu.Unlock()
+				qm.activeRegMu.RLock()
+				aq, ok := qm.activeReg[msg.QueryID]
+				qm.activeRegMu.RUnlock()
 				if ok {
 					log.Printf("Received remote cancellation request for query %s", msg.QueryID)
-					cancel()
+					aq.cancel()
 				}
 			}
 		}
@@ -571,7 +955,7 @@ func (qm *QueryManager) controlWorker() {
 }
 
 func (qm *QueryManager) gcWorker() {
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(gcInterval)
 	defer ticker.Stop()
 
 	for {
@@ -587,50 +971,84 @@ func (qm *QueryManager) gcWorker() {
 // collectGarbage transitions expired queries to EXPIRED and removes their
 // storage results and metadata. Extracted from gcWorker for testability.
 func (qm *QueryManager) collectGarbage() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	expiredIDs, err := qm.metaStore.ListExpiredQueries(ctx)
-	cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), gcBudget)
+	defer cancel()
 
+	// ListExpiredQueries returns the same set on every instance. Without a lock
+	// they race to delete the same result: one wins, the rest log a deletion
+	// failure, and those false alarms hide the real ones.
+	locked, err := qm.metaStore.TryLock(ctx, gcLockName, gcLockTTL)
+	if err != nil {
+		log.Printf("ERROR: GC worker failed to acquire the cluster lock: %v", err)
+		return
+	}
+	if !locked {
+		return
+	}
+
+	expiredIDs, err := qm.metaStore.ListExpiredQueries(ctx)
 	if err != nil {
 		log.Printf("ERROR: GC worker failed to list expired queries: %v", err)
 		return
 	}
 
 	for _, id := range expiredIDs {
-		gcCtx, gcCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		rec, err := qm.metaStore.GetQuery(gcCtx, id)
-		if err == nil {
-			// Transition to EXPIRED before deleting (spec state machine §3).
-			if rec.State != domain.StateExpired {
-				rec.State = domain.StateExpired
-				if err := qm.metaStore.UpdateQuery(gcCtx, rec); err != nil {
-					log.Printf("ERROR: GC failed to mark query %s as EXPIRED: %v", id, err)
-				}
-				qm.notifyWatchers(QueryEvent{QueryID: id, State: domain.StateExpired})
-			}
-			if rec.Result != nil {
-				store, err := storage.GetStore(rec.Result.Backend)
-				if err == nil {
-					log.Printf("GC: Deleting results storage for query %s", id)
-					if err := store.Delete(gcCtx, *rec.Result); err != nil {
-						log.Printf("ERROR: GC failed to delete results for query %s: %v", id, err)
-					}
-				}
-			}
+		if ctx.Err() != nil {
+			log.Printf("GC: budget exhausted, %d queries left for the next pass", len(expiredIDs))
+			return
 		}
-		log.Printf("GC: Deleting metadata for expired query %s", id)
-		if err := qm.metaStore.DeleteQuery(gcCtx, id); err != nil {
-			log.Printf("ERROR: GC failed to delete metadata for query %s: %v", id, err)
-		}
-		gcCancel()
+		qm.collectQuery(ctx, id)
 	}
 }
 
-// ownerReaper detects queries whose owner instance has died (its heartbeat/lease
-// key expired) while still in a non-terminal state, and fails them with OWNER_LOST
-// (spec §3). Queries this instance is actively running are skipped.
+// collectQuery expires and removes a single query. Metadata is kept whenever
+// the stored result could not be deleted: dropping it would strip the only
+// reference to the orphaned object and make a retry impossible.
+func (qm *QueryManager) collectQuery(ctx context.Context, id string) {
+	rec, err := qm.metaStore.GetQuery(ctx, id)
+	if err != nil {
+		if !errors.Is(err, state.ErrNotFound) {
+			log.Printf("ERROR: GC failed to read query %s: %v", id, err)
+		}
+		return
+	}
+
+	if rec.State != domain.StateExpired {
+		if !rec.State.CanTransitionTo(domain.StateExpired) {
+			log.Printf("ERROR: GC refusing transition %s -> EXPIRED for query %s", rec.State, id)
+			return
+		}
+		rec.State = domain.StateExpired
+		if err := qm.metaStore.UpdateQuery(ctx, rec); err != nil {
+			log.Printf("ERROR: GC failed to mark query %s as EXPIRED: %v", id, err)
+			return
+		}
+		qm.notifyWatchers(QueryEvent{QueryID: id, State: domain.StateExpired})
+	}
+
+	if rec.Result != nil {
+		store, err := storage.GetStore(rec.Result.Backend)
+		if err != nil {
+			log.Printf("ERROR: GC keeping metadata for query %s: %v", id, err)
+			return
+		}
+		log.Printf("GC: Deleting results storage for query %s", id)
+		if err := store.Delete(ctx, *rec.Result); err != nil {
+			log.Printf("ERROR: GC keeping metadata for query %s, result deletion failed: %v", id, err)
+			return
+		}
+	}
+
+	log.Printf("GC: Deleting metadata for expired query %s", id)
+	if err := qm.metaStore.DeleteQuery(ctx, id); err != nil {
+		log.Printf("ERROR: GC failed to delete metadata for query %s: %v", id, err)
+	}
+}
+
+// ownerReaper detects queries whose owner instance has died (its lease expired)
+// while still in a non-terminal state, and fails them with OWNER_LOST (spec §3).
 func (qm *QueryManager) ownerReaper() {
-	ticker := time.NewTicker(qm.cfgManager.Get().Instance.HeartbeatTTL)
+	ticker := time.NewTicker(qm.heartbeatTTL())
 	defer ticker.Stop()
 
 	for {
@@ -646,16 +1064,21 @@ func (qm *QueryManager) ownerReaper() {
 // reapStaleOwners fails non-terminal queries whose owner instance is gone.
 // Extracted from ownerReaper for testability.
 func (qm *QueryManager) reapStaleOwners() {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), reapBudget)
+	defer cancel()
+
 	staleIDs, err := qm.metaStore.ListStaleQueries(ctx)
-	cancel()
 	if err != nil {
 		log.Printf("ERROR: owner reaper failed to list stale queries: %v", err)
 		return
 	}
 
+	// A query created moments ago may not have been heartbeated yet. Without a
+	// grace period a Redis hiccup or a GC pause is enough to fail a query that
+	// is running perfectly well, after which its owner overwrites the verdict.
+	grace := 2 * qm.heartbeatTTL()
+
 	for _, id := range staleIDs {
-		// Skip queries we own and are actively running locally.
 		qm.activeRegMu.RLock()
 		_, local := qm.activeReg[id]
 		qm.activeRegMu.RUnlock()
@@ -663,30 +1086,77 @@ func (qm *QueryManager) reapStaleOwners() {
 			continue
 		}
 
-		rCtx, rCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		rec, err := qm.metaStore.GetQuery(rCtx, id)
-		if err == nil && (rec.State == domain.StateRunning || rec.State == domain.StatePending) {
-			rec.State = domain.StateFailed
-			rec.FinishedAt = time.Now()
-			rec.Error = &domain.QueryError{
-				Code:      "OWNER_LOST",
-				Message:   "owner instance lost before query completion",
-				Retryable: true,
-			}
-			if err := qm.metaStore.UpdateQuery(rCtx, rec); err != nil {
-				log.Printf("ERROR: owner reaper failed to fail query %s: %v", id, err)
-			} else {
-				log.Printf("Owner reaper: marked query %s as FAILED (owner_lost)", id)
-				qm.notifyWatchers(QueryEvent{
-					QueryID: id,
-					State:   domain.StateFailed,
-					Error:   rec.Error,
-				})
-				telemetry.RecordQueryCompleted(qm.getEngine(rec.DatabaseID), string(domain.StateFailed), 0)
-			}
+		rec, err := qm.metaStore.GetQuery(ctx, id)
+		if err != nil {
+			continue
 		}
-		rCancel()
+		// Queries this instance owns are its own to finish; a restart is handled
+		// once, at startup, by recoverOrphans.
+		if rec.OwnerInstanceID == qm.instanceID {
+			continue
+		}
+		if time.Since(rec.CreatedAt) < grace {
+			continue
+		}
+
+		qm.failOwnerLost(ctx, rec)
 	}
+}
+
+// recoverOrphans fails queries this instance still owns in the MetaStore but is
+// not running. They belong to a previous process that died mid-flight: nothing
+// else will ever reap them, because every other instance skips records it does
+// not own, and this node would otherwise report can_be_stopped=true while its
+// old records sit in RUNNING for ever.
+func (qm *QueryManager) recoverOrphans() {
+	ctx, cancel := context.WithTimeout(context.Background(), reapBudget)
+	defer cancel()
+
+	ids, err := qm.metaStore.ListByInstance(ctx, qm.instanceID)
+	if err != nil {
+		log.Printf("ERROR: failed to list queries owned by %s at startup: %v", qm.instanceID, err)
+		return
+	}
+
+	for _, id := range ids {
+		rec, err := qm.metaStore.GetQuery(ctx, id)
+		if err != nil {
+			continue
+		}
+		if rec.State.IsTerminal() {
+			continue
+		}
+		log.Printf("Recovering orphaned query %s left behind by a previous process", id)
+		qm.failOwnerLost(ctx, rec)
+	}
+}
+
+// failOwnerLost marks a query FAILED/OWNER_LOST, but only while it is still
+// non-terminal. The conditional write is the fence: without it a reaper can
+// overwrite a SUCCEEDED record (and its ResultRef) that landed in between.
+func (qm *QueryManager) failOwnerLost(ctx context.Context, rec *domain.QueryRecord) {
+	failed := *rec
+	failed.State = domain.StateFailed
+	failed.FinishedAt = time.Now()
+	failed.Error = domain.NewQueryError(domain.ErrCodeOwnerLost, "owner instance lost before query completion", true)
+
+	written, err := qm.metaStore.UpdateQueryIfState(ctx, &failed, domain.StatePending, domain.StateRunning)
+	if err != nil {
+		log.Printf("ERROR: owner reaper failed to fail query %s: %v", rec.ID, err)
+		return
+	}
+	if !written {
+		// Somebody else finished it first; that verdict wins.
+		return
+	}
+
+	log.Printf("Owner reaper: marked query %s as FAILED (owner_lost)", rec.ID)
+	qm.notifyWatchers(QueryEvent{
+		QueryID: rec.ID,
+		State:   domain.StateFailed,
+		Error:   failed.Error,
+	})
+	telemetry.RecordQueryCompleted(qm.getEngine(rec.DatabaseID), string(domain.StateFailed), 0)
 }
 
 func (qm *QueryManager) getEngine(dbID string) string {
@@ -704,24 +1174,61 @@ func (qm *QueryManager) GetConfig() *config.Config {
 }
 
 func (qm *QueryManager) GetPool(dbID string) (db.Pool, bool) {
-	qm.dbPoolsMu.RLock()
-	defer qm.dbPoolsMu.RUnlock()
-	pool, ok := qm.dbPools[dbID]
-	return pool, ok
+	return qm.lookupPool(dbID)
+}
+
+// DatabasesSeen returns the databases that have had at least one query
+// submitted, including ones no longer present in the configuration.
+func (qm *QueryManager) DatabasesSeen(ctx context.Context) ([]string, error) {
+	return qm.metaStore.ListDatabasesSeen(ctx)
 }
 
 func (qm *QueryManager) Close() error {
+	qm.Drain()
 	qm.cancel()
 	qm.wg.Wait()
 
+	// Anything still executing has already outlived the shutdown grace period
+	// the caller allowed, so it is canceled rather than waited on for ever.
+	qm.cancelActive()
+	waitFor(&qm.queryWG, queryCloseTimeout)
+	qm.poolWG.Wait()
+
 	qm.dbPoolsMu.Lock()
 	defer qm.dbPoolsMu.Unlock()
-	for id, pool := range qm.dbPools {
-		if err := pool.Close(); err != nil {
+	for id, mp := range qm.dbPools {
+		if err := mp.pool.Close(); err != nil {
 			log.Printf("ERROR: failed to close database pool %s: %v", id, err)
 		}
 	}
 	return nil
+}
+
+func (qm *QueryManager) cancelActive() {
+	qm.activeRegMu.RLock()
+	cancels := make([]context.CancelFunc, 0, len(qm.activeReg))
+	for _, aq := range qm.activeReg {
+		cancels = append(cancels, aq.cancel)
+	}
+	qm.activeRegMu.RUnlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+// waitFor waits for wg, giving up after timeout so shutdown cannot hang on a
+// query that refuses to notice its canceled context.
+func waitFor(wg *sync.WaitGroup, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		log.Printf("WARNING: gave up waiting for query goroutines after %v", timeout)
+	}
 }
 
 // deletePartial removes a partially written result after a failed or canceled

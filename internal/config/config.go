@@ -31,6 +31,13 @@ type ServerConfig struct {
 type DefaultsConfig struct {
 	ResultTTL    time.Duration `yaml:"result_ttl"`    // default 24h
 	QueryTimeout time.Duration `yaml:"query_timeout"` // default 0 (unlimited)
+	// MaxConcurrentQueries caps executions running on this instance at once;
+	// 0 means unlimited. Fixed at startup, see NonReloadableChanges.
+	MaxConcurrentQueries int `yaml:"max_concurrent_queries"`
+	// AllowWrites disables the read-only statement guard. It defaults to false:
+	// a proxy that materializes results has no reason to run DML or DDL, and an
+	// exposed endpoint that does is remote code execution against the database.
+	AllowWrites bool `yaml:"allow_writes"`
 }
 
 // StorageFSConfig configures local filesystem storage.

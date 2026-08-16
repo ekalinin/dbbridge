@@ -184,7 +184,7 @@ func (h *QueryHandler) WatchQuery(ctx context.Context, req *connect.Request[v1.W
 			var protoErr *v1.QueryError
 			if ev.Error != nil {
 				protoErr = &v1.QueryError{
-					Code:      ev.Error.Code,
+					Code:      string(ev.Error.Code),
 					Message:   ev.Error.Message,
 					Retryable: ev.Error.Retryable,
 				}
@@ -213,7 +213,7 @@ func mapToProtoRecord(r *domain.QueryRecord) *v1.QueryRecord {
 	var protoErr *v1.QueryError
 	if r.Error != nil {
 		protoErr = &v1.QueryError{
-			Code:      r.Error.Code,
+			Code:      string(r.Error.Code),
 			Message:   r.Error.Message,
 			Retryable: r.Error.Retryable,
 		}
