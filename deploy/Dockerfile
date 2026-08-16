@@ -23,13 +23,19 @@ WORKDIR /app
 
 RUN apk add --no-cache ca-certificates tzdata
 
+# Run as an unprivileged user. Without this the process is root, which turns any
+# file-handling defect into "write anywhere in the container".
+RUN adduser -D -u 10001 dbbridge
+
 # Copy binary from builder
 COPY --from=builder /app/dbbridge .
 
-# Create results directory
-RUN mkdir -p /app/results
+# Create results directory owned by the runtime user
+RUN mkdir -p /app/results && chown -R dbbridge:dbbridge /app/results
 
-EXPOSE 8080 9090
+USER 10001:10001
+
+EXPOSE 8080 8081 9090
 
 ENTRYPOINT ["/app/dbbridge"]
 CMD ["-config", "configs/dbbridge.yaml"]

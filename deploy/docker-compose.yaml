@@ -2,8 +2,12 @@ services:
   redis:
     image: redis:7-alpine
     container_name: dbbridge-redis
-    ports:
-      - "6379:6379"
+    # The port is not published: the metastore holds query records and lease
+    # keys, and anyone who can write to it can point a ResultRef wherever they
+    # like. Reach it from another container on this network instead.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-dbbridge-dev}"]
+    expose:
+      - "6379"
 
   # Sample target database (dvdrental) for manual testing against dbbridge
   postgres:
@@ -45,9 +49,11 @@ services:
       /bin/sh -c "
       until (/usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin) do echo 'Waiting for Minio...' && sleep 1; done;
       /usr/bin/mc mb --ignore-existing myminio/dbbridge;
-      /usr/bin/mc anonymous set public myminio/dbbridge;
       exit 0;
       "
+    # The bucket is deliberately left private. It used to be made anonymously
+    # readable, which published every query result to anyone who could guess an
+    # object key.
 
   dbbridge-blue:
     build:
@@ -57,8 +63,14 @@ services:
     ports:
       - "8081:8080" # REST API port mapped to 8081 on host
       - "9091:9090" # gRPC port mapped to 9091 on host
+      - "8181:8081" # metrics + admin listener, kept off the REST port
     environment:
       - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-dbbridge-dev}
+      - S3_ACCESS_KEY_ID=minioadmin
+      - S3_SECRET_ACCESS_KEY=minioadmin
+      - DBBRIDGE_TOKEN_REPORTING=${DBBRIDGE_TOKEN_REPORTING:-dev-reporting-token}
+      - DBBRIDGE_TOKEN_ADMIN=${DBBRIDGE_TOKEN_ADMIN:-dev-admin-token}
     volumes:
       - ./configs/dbbridge-blue.yaml:/app/configs/dbbridge.yaml
     depends_on:
@@ -74,8 +86,14 @@ services:
     ports:
       - "8082:8080" # REST API port mapped to 8082 on host
       - "9092:9090" # gRPC port mapped to 9092 on host
+      - "8182:8081" # metrics + admin listener, kept off the REST port
     environment:
       - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-dbbridge-dev}
+      - S3_ACCESS_KEY_ID=minioadmin
+      - S3_SECRET_ACCESS_KEY=minioadmin
+      - DBBRIDGE_TOKEN_REPORTING=${DBBRIDGE_TOKEN_REPORTING:-dev-reporting-token}
+      - DBBRIDGE_TOKEN_ADMIN=${DBBRIDGE_TOKEN_ADMIN:-dev-admin-token}
     volumes:
       - ./configs/dbbridge-green.yaml:/app/configs/dbbridge.yaml
     depends_on:

@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -19,6 +21,20 @@ type InstanceConfig struct {
 	DefaultStorage string        `yaml:"default_storage"` // "fs", "s3", "clickhouse"
 	HeartbeatTTL   time.Duration `yaml:"heartbeat_ttl"`   // default 5s
 	OTLPEndpoint   string        `yaml:"otlp_endpoint"`   // OTLP gRPC endpoint; empty disables OTLP export
+}
+
+// TLSConfig enables TLS on the REST and gRPC listeners.
+type TLSConfig struct {
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+	// AllowH2C serves gRPC as cleartext HTTP/2 when TLS is off. It has to be
+	// asked for: it is a local-development mode, not a default.
+	AllowH2C bool `yaml:"allow_h2c"`
+}
+
+// Enabled reports whether a certificate pair was configured.
+func (t TLSConfig) Enabled() bool {
+	return t.CertFile != "" && t.KeyFile != ""
 }
 
 // ServerConfig configures REST, gRPC and WS endpoints.
@@ -46,7 +62,8 @@ type ServerConfig struct {
 	// AdminAddr, when set, moves /metrics and /v1/admin/* to their own
 	// listener. /metrics enumerates every configured db_id and the admin
 	// routes reload the process, so neither belongs on the public port.
-	AdminAddr string `yaml:"admin_addr"`
+	AdminAddr string    `yaml:"admin_addr"`
+	TLS       TLSConfig `yaml:"tls"`
 }
 
 // AuthConfig configures API authentication. A nil pointer means the section is
@@ -145,6 +162,61 @@ func (m *Manager) Get() *Config {
 	return m.ptr.Load()
 }
 
+// envRef matches a ${VAR} reference. Bare $VAR is deliberately not matched:
+// DSNs and passwords legitimately contain a dollar sign.
+var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandEnv substitutes ${VAR} references in the scalars of a parsed document.
+//
+// Without it a value like `dbbridge-${POD_NAME}` stayed a literal, and in
+// Kubernetes that meant every replica reported the same instance ID, which
+// makes leases, remote cancellation and owner-loss detection meaningless. An
+// unset variable is an error rather than an empty string, for the same reason.
+//
+// It walks the node tree rather than the file text. Substituting into the raw
+// YAML made the value part of the markup: a password containing a quote or a
+// backslash failed the parse with an error that named neither the variable nor
+// the real line, and one with a trailing newline - what `kubectl create secret
+// --from-file` produces - silently turned into a different string. Comments are
+// left alone for the same reason, so a commented-out example can name a
+// variable that is not set.
+func expandEnv(node *yaml.Node) error {
+	var missing []string
+
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n.Kind == yaml.ScalarNode {
+			expanded := envRef.ReplaceAllStringFunc(n.Value, func(match string) string {
+				name := envRef.FindStringSubmatch(match)[1]
+				value, ok := os.LookupEnv(name)
+				if !ok {
+					missing = append(missing, name)
+					return match
+				}
+				return value
+			})
+			if expanded != n.Value {
+				n.Value = expanded
+				// Let the type be resolved from the substituted value, so
+				// max_conns: ${MAX_CONNS} still decodes as a number while a
+				// password keeps every byte it was given.
+				n.Tag = ""
+				n.Style = 0
+			}
+			return
+		}
+		for _, child := range n.Content {
+			walk(child)
+		}
+	}
+	walk(node)
+
+	if len(missing) > 0 {
+		return fmt.Errorf("unset environment variables referenced by the config: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 // Reload re-reads the config file from disk, parses it and performs atomic swap.
 func (m *Manager) Reload() error {
 	data, err := os.ReadFile(m.configPath)
@@ -152,9 +224,21 @@ func (m *Manager) Reload() error {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return fmt.Errorf("failed to unmarshal yaml: %w", err)
+	}
+
+	var cfg Config
+	// An empty file leaves the document with no content; the zero Config then
+	// fails validation with a message about the missing instance ID.
+	if doc.Kind != 0 {
+		if err := expandEnv(&doc); err != nil {
+			return fmt.Errorf("failed to expand config: %w", err)
+		}
+		if err := doc.Decode(&cfg); err != nil {
+			return fmt.Errorf("failed to unmarshal yaml: %w", err)
+		}
 	}
 
 	if err := validate(&cfg); err != nil {
@@ -221,6 +305,9 @@ func validate(cfg *Config) error {
 	// the API wide open while the operator believes it is protected.
 	if cfg.Auth != nil && len(cfg.Auth.Tokens) == 0 {
 		return fmt.Errorf("auth is configured but auth.tokens is empty")
+	}
+	if (cfg.Server.TLS.CertFile == "") != (cfg.Server.TLS.KeyFile == "") {
+		return fmt.Errorf("server.tls needs both cert_file and key_file")
 	}
 	// Check databases
 	seen := make(map[string]bool)

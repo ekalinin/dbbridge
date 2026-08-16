@@ -21,6 +21,7 @@ import (
 	"github.com/ekalinin/dbbridge/internal/storage/backends/fs"
 	"github.com/ekalinin/dbbridge/internal/storage/backends/s3"
 	"github.com/ekalinin/dbbridge/internal/telemetry"
+	"github.com/ekalinin/dbbridge/internal/transport/certs"
 	"github.com/ekalinin/dbbridge/internal/transport/grpcconnect"
 	"github.com/ekalinin/dbbridge/internal/transport/rest"
 
@@ -214,7 +215,15 @@ func main() {
 	}
 	grpcHTTP.Protocols = new(http.Protocols)
 	grpcHTTP.Protocols.SetHTTP1(true)
-	grpcHTTP.Protocols.SetUnencryptedHTTP2(true)
+	if cfg.Server.TLS.Enabled() {
+		// TLS carries HTTP/2 through ALPN; cleartext HTTP/2 is not needed.
+		grpcHTTP.Protocols.SetHTTP2(true)
+	} else {
+		if !cfg.Server.TLS.AllowH2C {
+			log.Print("WARNING: gRPC is served as cleartext HTTP/2 (h2c); configure server.tls or set server.tls.allow_h2c to acknowledge this")
+		}
+		grpcHTTP.Protocols.SetUnencryptedHTTP2(true)
+	}
 
 	var adminHTTP *http.Server
 	if h := restServer.AdminHandler(); h != nil {
@@ -228,27 +237,45 @@ func main() {
 	}
 
 	// 7. Start Servers
-	go func() {
-		log.Printf("Starting REST API on %s", cfg.Server.RESTAddr)
-		if err := restHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("REST API server failed: %v", err)
+	tlsCfg := cfg.Server.TLS
+	// The pair is loaded here rather than inside ListenAndServeTLS, so a wrong
+	// path fails the start with a clear message instead of killing a listener
+	// goroutine once the other listeners, the MetaStore and the pools are
+	// already up - a log.Fatalf there skips every deferred cleanup.
+	var tlsCerts *certs.Reloader
+	if tlsCfg.Enabled() {
+		tlsCerts, err = certs.NewReloader(tlsCfg.CertFile, tlsCfg.KeyFile)
+		if err != nil {
+			log.Fatalf("Failed to load the TLS key pair: %v", err)
 		}
-	}()
-
-	go func() {
-		log.Printf("Starting gRPC / Connect API on %s", cfg.Server.GRPCAddr)
-		if err := grpcHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("gRPC Connect server failed: %v", err)
-		}
-	}()
-
-	if adminHTTP != nil {
+	}
+	serve := func(name string, srv *http.Server) {
 		go func() {
-			log.Printf("Starting metrics / admin API on %s", cfg.Server.AdminAddr)
-			if err := adminHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("Admin server failed: %v", err)
+			scheme := "http"
+			if tlsCerts != nil {
+				scheme = "https"
+				srv.TLSConfig = tlsCerts.TLSConfig()
+			}
+			log.Printf("Starting %s on %s (%s)", name, srv.Addr, scheme)
+			var err error
+			if tlsCerts != nil {
+				// The paths are empty on purpose: the certificate comes from
+				// TLSConfig.GetCertificate, which re-reads the files when they
+				// change, so a rotated certificate does not wait for a restart.
+				err = srv.ListenAndServeTLS("", "")
+			} else {
+				err = srv.ListenAndServe()
+			}
+			if err != nil && err != http.ErrServerClosed {
+				log.Fatalf("%s failed: %v", name, err)
 			}
 		}()
+	}
+
+	serve("REST API", restHTTP)
+	serve("gRPC / Connect API", grpcHTTP)
+	if adminHTTP != nil {
+		serve("metrics / admin API", adminHTTP)
 	}
 
 	// 8. Handle OS Signals (Graceful Reload & Shutdown)

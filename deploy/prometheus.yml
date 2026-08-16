@@ -3,5 +3,12 @@ global:
 
 scrape_configs:
   - job_name: 'dbbridge'
+    # /metrics needs the admin scope: its labels enumerate every configured
+    # db_id and the traffic volume per database. The value below is the dev
+    # default of DBBRIDGE_TOKEN_ADMIN in docker-compose.yaml; a real deployment
+    # points credentials_file at a mounted secret instead.
+    authorization:
+      credentials: dev-admin-token
     static_configs:
-      - targets: ['dbbridge-blue:8080', 'dbbridge-green:8080']
+      # /metrics moved to the admin listener, off the public REST port.
+      - targets: ['dbbridge-blue:8081', 'dbbridge-green:8081']

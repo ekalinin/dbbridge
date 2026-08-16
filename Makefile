@@ -106,10 +106,12 @@ restart:
 # ── Admin endpoints ──────────────────────────────────────────────────────────
 
 reload-config:
-	curl -s -X POST http://localhost:8081/v1/admin/reload | jq .
+	curl -s -X POST http://localhost:8181/v1/admin/reload \
+		-H "Authorization: Bearer $${DBBRIDGE_TOKEN_ADMIN:-dev-admin-token}" | jq .
 
 can-stop:
-	curl -s http://localhost:8081/v1/admin/can-stop | jq .
+	curl -s http://localhost:8181/v1/admin/can-stop \
+		-H "Authorization: Bearer $${DBBRIDGE_TOKEN_ADMIN:-dev-admin-token}" | jq .
 
 # ── Kubernetes ───────────────────────────────────────────────────────────────
 
