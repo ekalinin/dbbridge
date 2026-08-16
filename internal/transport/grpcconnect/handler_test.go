@@ -254,7 +254,7 @@ func TestConnect_ErrorCodes(t *testing.T) {
 	}{
 		{"unknown database", &v1.StartQueryRequest{DatabaseId: "nope", Sql: "SELECT 1"}, connect.CodeNotFound},
 		{"bad format", &v1.StartQueryRequest{DatabaseId: "testdb", Sql: "SELECT 1",
-			Options: &v1.QueryOptions{ResultFormat: "parquet"}}, connect.CodeInvalidArgument},
+			Options: &v1.QueryOptions{ResultFormat: "avro"}}, connect.CodeInvalidArgument},
 		{"write statement", &v1.StartQueryRequest{DatabaseId: "testdb", Sql: "DROP TABLE t"}, connect.CodeInvalidArgument},
 	}
 

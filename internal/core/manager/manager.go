@@ -2,8 +2,11 @@ package manager
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"slices"
@@ -79,6 +82,12 @@ type QueryManager struct {
 	cfgManager *config.Manager
 	metaStore  state.MetaStore
 	instanceID string
+	// defaultStorage is captured at construction, like instanceID. The store
+	// registry is built once in main and never grows, so honouring a reloaded
+	// instance.default_storage would point every new query at a backend that
+	// was never built - a permanent 400 no reload could undo. Reporting the
+	// section as ignored is only honest if it really is ignored (spec §8).
+	defaultStorage string
 
 	dbPools   map[string]*managedPool
 	dbPoolsMu sync.RWMutex
@@ -109,14 +118,15 @@ func NewQueryManager(cfgManager *config.Manager, metaStore state.MetaStore) (*Qu
 	cfg := cfgManager.Get()
 
 	qm := &QueryManager{
-		cfgManager: cfgManager,
-		metaStore:  metaStore,
-		dbPools:    make(map[string]*managedPool),
-		instanceID: cfg.Instance.ID,
-		activeReg:  make(map[string]*activeQuery),
-		watchers:   make(map[string]map[chan QueryEvent]struct{}),
-		ctx:        ctx,
-		cancel:     cancel,
+		cfgManager:     cfgManager,
+		metaStore:      metaStore,
+		dbPools:        make(map[string]*managedPool),
+		instanceID:     cfg.Instance.ID,
+		defaultStorage: cfg.Instance.DefaultStorage,
+		activeReg:      make(map[string]*activeQuery),
+		watchers:       make(map[string]map[chan QueryEvent]struct{}),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 	if n := cfg.Defaults.MaxConcurrentQueries; n > 0 {
 		qm.slots = make(chan struct{}, n)
@@ -309,7 +319,7 @@ func (qm *QueryManager) applyDefaults(opts domain.QueryOptions) domain.QueryOpti
 		opts.ResultFormat = "jsonl"
 	}
 	if opts.StorageBackend == "" {
-		opts.StorageBackend = cfg.Instance.DefaultStorage
+		opts.StorageBackend = qm.defaultStorage
 	}
 	return opts
 }
@@ -342,8 +352,15 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
-	if _, err := storage.GetStore(opts.StorageBackend); err != nil {
+	store, err := storage.GetStore(opts.StorageBackend)
+	if err != nil {
 		return nil, domain.ValidationError{Field: "storage_backend", Reason: "unknown storage backend"}
+	}
+	if !storage.SupportsFormat(store, opts.ResultFormat) {
+		return nil, domain.ValidationError{
+			Field:  "result_format",
+			Reason: fmt.Sprintf("storage backend %q cannot store %s results unchanged", opts.StorageBackend, opts.ResultFormat),
+		}
 	}
 	if !qm.cfgManager.Get().Defaults.AllowWrites {
 		if err := sqlguard.ReadOnly(sql); err != nil {
@@ -642,9 +659,12 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 		return
 	}
 
-	// Stream and Persist Rows
+	// Stream and Persist Rows. The checksum is computed from the same bytes on
+	// their way to storage, so it costs one pass and never needs the result to
+	// be read back.
 	storeStart := time.Now()
-	rowsCount, bytesWritten, encErr := storage.EncodeStream(ctx, rowsStream, record.Options.ResultFormat, writer)
+	hasher := sha256.New()
+	rowsCount, bytesWritten, encErr := storage.EncodeStream(ctx, rowsStream, record.Options.ResultFormat, io.MultiWriter(writer, hasher))
 	// Close is where S3 and ClickHouse wait for the upload/commit and surface
 	// its error, so its result decides whether the query really succeeded (I4).
 	closeErr := writer.Close()
@@ -667,6 +687,7 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	// Update stats & ref
 	ref.SizeBytes = bytesWritten
 	ref.RowCount = rowsCount
+	ref.Checksum = "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 
 	record.Result = &ref
 	record.Stats.RowsRead = rowsCount

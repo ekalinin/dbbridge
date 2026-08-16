@@ -54,7 +54,7 @@ type QueryOptions struct {
 	Mode           string        `json:"mode"`            // "sync" or "async"
 	ResultTTL      time.Duration `json:"result_ttl"`      // how long to keep query results
 	IdempotencyKey string        `json:"idempotency_key"` // uniqueness key
-	ResultFormat   string        `json:"result_format"`   // "jsonl" (default), "csv"
+	ResultFormat   string        `json:"result_format"`   // "jsonl" (default), "csv", "parquet"
 	StorageBackend string        `json:"storage_backend"` // override default storage engine
 }
 
@@ -62,7 +62,7 @@ type QueryOptions struct {
 // The list is a whitelist rather than a blacklist because ResultFormat reaches
 // the filesystem as part of a file name: anything outside this set must be
 // rejected before a storage writer is ever opened.
-var ValidResultFormats = []string{"jsonl", "csv"}
+var ValidResultFormats = []string{"jsonl", "csv", "parquet"}
 
 // ValidModes lists the accepted execution modes.
 var ValidModes = []string{"async", "sync"}

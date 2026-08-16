@@ -178,6 +178,21 @@ func validate(cfg *Config) error {
 	if cfg.Instance.DefaultStorage == "" {
 		cfg.Instance.DefaultStorage = "fs"
 	}
+	// Catch a default backend that can never be built at load time rather than
+	// after a query has already run against the database.
+	switch cfg.Instance.DefaultStorage {
+	case "fs":
+	case "s3":
+		if cfg.Storage.S3.Bucket == "" {
+			return fmt.Errorf("storage.s3.bucket must be set when default_storage is s3")
+		}
+	case "clickhouse":
+		if cfg.Storage.ClickHouse.DSN == "" {
+			return fmt.Errorf("storage.clickhouse.dsn must be set when default_storage is clickhouse")
+		}
+	default:
+		return fmt.Errorf("unsupported instance.default_storage: %s", cfg.Instance.DefaultStorage)
+	}
 	if cfg.Instance.HeartbeatTTL == 0 {
 		cfg.Instance.HeartbeatTTL = 5 * time.Second
 	}

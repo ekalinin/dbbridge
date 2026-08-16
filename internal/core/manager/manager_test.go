@@ -2,11 +2,14 @@ package manager
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,6 +45,7 @@ func TestMain(m *testing.M) {
 	storage.Register("fs", fsStore)
 	storage.Register(badCloseBackend, badCloseStore{})
 	storage.Register(badDeleteBackend, badDeleteStore{})
+	storage.Register(textOnlyBackend, textOnlyStore{})
 
 	code := m.Run()
 	os.RemoveAll(dir)
@@ -477,7 +481,7 @@ func TestSubmitQuery_RejectsUnknownOptions(t *testing.T) {
 		name string
 		opts domain.QueryOptions
 	}{
-		{"format", domain.QueryOptions{Mode: "async", ResultFormat: "parquet"}},
+		{"format", domain.QueryOptions{Mode: "async", ResultFormat: "avro"}},
 		{"mode", domain.QueryOptions{Mode: "SYNC"}},
 		{"backend", domain.QueryOptions{Mode: "async", StorageBackend: "nope"}},
 	}
@@ -836,6 +840,7 @@ func (f *failingMetaStore) attemptsFor(s domain.QueryState) int {
 const (
 	badCloseBackend  = "badclose"
 	badDeleteBackend = "baddelete"
+	textOnlyBackend  = "textonly"
 )
 
 // badCloseStore accepts every write and fails in Close, the way an S3 upload
@@ -857,6 +862,12 @@ type failingCloser struct{}
 
 func (failingCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (failingCloser) Close() error                { return errors.New("upload did not complete") }
+
+// textOnlyStore stands in for the ClickHouse backend: it stores the result as
+// rows of text, so a binary format does not survive the round trip.
+type textOnlyStore struct{ badCloseStore }
+
+func (textOnlyStore) SupportsFormat(format string) bool { return format != "parquet" }
 
 // badDeleteStore fails cleanup, which is what a storage outage looks like to GC.
 type badDeleteStore struct{ badCloseStore }
@@ -988,3 +999,94 @@ func (p *identPool) Exec(_ context.Context, _ string) (db.RowStream, error) {
 func (p *identPool) Ping(_ context.Context) error { return nil }
 func (p *identPool) Stat() db.PoolStat            { return db.PoolStat{} }
 func (p *identPool) Close() error                 { return nil }
+
+// TestRun_ComputesChecksum: ResultRef.Checksum was always empty, so a download
+// could not be verified against what was written.
+func TestRun_ComputesChecksum(t *testing.T) {
+	qm, _ := newManager(t)
+	rec, err := qm.SubmitQuery(context.Background(), "testdb", "SELECT 1",
+		domain.QueryOptions{Mode: "sync", ResultFormat: "jsonl"})
+	if err != nil {
+		t.Fatalf("SubmitQuery: %v", err)
+	}
+	if rec.Result == nil {
+		t.Fatal("no result ref")
+	}
+	if !strings.HasPrefix(rec.Result.Checksum, "sha256:") {
+		t.Fatalf("checksum = %q, want a sha256: prefix", rec.Result.Checksum)
+	}
+
+	store, err := storage.GetStore(rec.Result.Backend)
+	if err != nil {
+		t.Fatalf("GetStore: %v", err)
+	}
+	reader, err := store.Reader(context.Background(), *rec.Result)
+	if err != nil {
+		t.Fatalf("Reader: %v", err)
+	}
+	defer reader.Close()
+
+	sum := sha256.New()
+	if _, err := io.Copy(sum, reader); err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	want := "sha256:" + hex.EncodeToString(sum.Sum(nil))
+	if rec.Result.Checksum != want {
+		t.Errorf("checksum = %q, want %q for the stored bytes", rec.Result.Checksum, want)
+	}
+}
+
+// TestSubmitQuery_ParquetProducesParquet: the format used to serialize JSONL
+// into a .parquet file.
+func TestSubmitQuery_ParquetProducesParquet(t *testing.T) {
+	qm, _ := newManager(t)
+	rec, err := qm.SubmitQuery(context.Background(), "testdb", "SELECT 1",
+		domain.QueryOptions{Mode: "sync", ResultFormat: "parquet"})
+	if err != nil {
+		t.Fatalf("SubmitQuery: %v", err)
+	}
+	if rec.State != domain.StateSucceeded {
+		t.Fatalf("state = %s, want SUCCEEDED", rec.State)
+	}
+
+	store, _ := storage.GetStore(rec.Result.Backend)
+	reader, err := store.Reader(context.Background(), *rec.Result)
+	if err != nil {
+		t.Fatalf("Reader: %v", err)
+	}
+	defer reader.Close()
+
+	magic := make([]byte, 4)
+	if _, err := io.ReadFull(reader, magic); err != nil {
+		t.Fatalf("read magic: %v", err)
+	}
+	if string(magic) != "PAR1" {
+		t.Errorf("result starts with %q, want the parquet magic PAR1", magic)
+	}
+}
+
+// TestSubmitQuery_RejectsFormatTheBackendCannotHold: the pair
+// result_format: parquet + a line-oriented backend became reachable once both
+// halves were enabled, and it produced a file whose "PAR1" footer came back as
+// "AR1\n" - unreadable, and with a checksum that no longer matched.
+func TestSubmitQuery_RejectsFormatTheBackendCannotHold(t *testing.T) {
+	qm, _ := newManager(t)
+
+	_, err := qm.SubmitQuery(context.Background(), "testdb", "SELECT 1", domain.QueryOptions{
+		Mode:           "sync",
+		ResultFormat:   "parquet",
+		StorageBackend: textOnlyBackend,
+	})
+	if _, ok := errors.AsType[domain.ValidationError](err); !ok {
+		t.Fatalf("err = %v, want a ValidationError", err)
+	}
+
+	// The text formats the backend does hold are still accepted.
+	if _, err := qm.SubmitQuery(context.Background(), "testdb", "SELECT 1", domain.QueryOptions{
+		Mode:           "sync",
+		ResultFormat:   "jsonl",
+		StorageBackend: textOnlyBackend,
+	}); err != nil {
+		t.Errorf("jsonl on the same backend was rejected: %v", err)
+	}
+}

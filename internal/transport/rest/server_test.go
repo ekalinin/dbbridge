@@ -84,7 +84,7 @@ func TestREST_ErrorsAreTypedAndSanitized(t *testing.T) {
 		want int
 	}{
 		{"unknown database", `{"database_id":"nope","sql":"SELECT 1"}`, http.StatusNotFound},
-		{"bad format", `{"database_id":"testdb","sql":"SELECT 1","options":{"result_format":"parquet"}}`, http.StatusBadRequest},
+		{"bad format", `{"database_id":"testdb","sql":"SELECT 1","options":{"result_format":"avro"}}`, http.StatusBadRequest},
 		{"bad mode", `{"database_id":"testdb","sql":"SELECT 1","options":{"mode":"SYNC"}}`, http.StatusBadRequest},
 		{"write statement", `{"database_id":"testdb","sql":"DELETE FROM t"}`, http.StatusBadRequest},
 		{"malformed json", `{`, http.StatusBadRequest},

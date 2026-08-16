@@ -498,11 +498,11 @@ components:
               description: Seconds to retain the result; 0 uses server default
             result_format:
               type: string
-              enum: [jsonl, csv]
+              enum: [jsonl, csv, parquet]
               default: jsonl
               description: |
-                Validated against this list before the query runs. `parquet` is
-                declared in the spec but not implemented, so it is rejected.
+                Validated against this list before the query runs; anything else
+                is rejected with 400 before a storage writer is opened.
             storage_backend:
               type: string
               enum: [fs, s3, clickhouse]
@@ -644,6 +644,7 @@ components:
           type: string
         checksum:
           type: string
+          description: "`sha256:<hex>` over the stored bytes, computed while streaming"
 
     QueryError:
       type: object

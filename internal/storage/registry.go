@@ -26,6 +26,27 @@ type ResultStore interface {
 	Delete(ctx context.Context, ref domain.ResultRef) error
 }
 
+// FormatChecker is implemented by a backend that cannot hold every result
+// format losslessly. A store that does not implement it is assumed to return
+// exactly the bytes it was given.
+type FormatChecker interface {
+	// SupportsFormat reports whether a result in this format survives a write
+	// followed by a read byte for byte.
+	SupportsFormat(format string) bool
+}
+
+// SupportsFormat reports whether store can hold format without altering it.
+// The pair is checked at submission time: the alternative is a query that runs
+// to completion and leaves behind a result file its own checksum no longer
+// matches.
+func SupportsFormat(store ResultStore, format string) bool {
+	fc, ok := store.(FormatChecker)
+	if !ok {
+		return true
+	}
+	return fc.SupportsFormat(format)
+}
+
 var (
 	storesMu sync.RWMutex
 	stores   = make(map[string]ResultStore)

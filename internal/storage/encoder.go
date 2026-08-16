@@ -74,7 +74,11 @@ func EncodeStream(ctx context.Context, stream db.RowStream, format string, w io.
 			return rowCount, cw.Count, fmt.Errorf("csv flush failed: %w", err)
 		}
 
-	case "jsonl", "parquet": // Fallback parquet to jsonl in v1 if not using full parquet engine
+	case "parquet":
+		rows, err := encodeParquet(ctx, stream, columns, cw)
+		return rows, cw.Count, err
+
+	case "jsonl":
 		scanArgs := make([]any, len(columns))
 		values := make([]any, len(columns))
 		for i := range scanArgs {

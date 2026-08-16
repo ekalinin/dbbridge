@@ -17,6 +17,7 @@ import (
 	"github.com/ekalinin/dbbridge/internal/lifecycle"
 	"github.com/ekalinin/dbbridge/internal/state"
 	"github.com/ekalinin/dbbridge/internal/storage"
+	clickhousestore "github.com/ekalinin/dbbridge/internal/storage/backends/clickhouse"
 	"github.com/ekalinin/dbbridge/internal/storage/backends/fs"
 	"github.com/ekalinin/dbbridge/internal/storage/backends/s3"
 	"github.com/ekalinin/dbbridge/internal/telemetry"
@@ -76,12 +77,25 @@ func main() {
 		}
 	}()
 
-	// 3. Initialize Storage backends
-	fsStore, err := fs.NewFSResultStore(cfg.Storage.FS.Root)
-	if err != nil {
-		log.Fatalf("Failed to initialize FS storage: %v", err)
+	// 3. Initialize Storage backends. Only the ones the configuration actually
+	// asks for: creating the FS store unconditionally means MkdirAll on every
+	// start, which fails outright under a read-only root filesystem even when
+	// results go to S3. A backend the configuration does ask for is fatal when
+	// it cannot be built, for all three alike - starting without it left the
+	// process answering 400 for that backend for the rest of its life, long
+	// after the dependency came back.
+	if cfg.Storage.FS.Root != "" || cfg.Instance.DefaultStorage == "fs" {
+		fsStore, err := fs.NewFSResultStore(cfg.Storage.FS.Root)
+		if err != nil {
+			log.Fatalf("Failed to initialize FS storage: %v", err)
+		}
+		storage.Register("fs", fsStore)
+		defer func() {
+			if err := fsStore.Close(); err != nil {
+				log.Printf("ERROR: FS storage close failed: %v", err)
+			}
+		}()
 	}
-	storage.Register("fs", fsStore)
 
 	if cfg.Storage.S3.Bucket != "" {
 		s3Store, err := s3.NewS3ResultStore(
@@ -93,11 +107,36 @@ func main() {
 			cfg.Storage.S3.Secret,
 		)
 		if err != nil {
-			log.Printf("WARNING: Failed to initialize S3 storage: %v", err)
-		} else {
-			storage.Register("s3", s3Store)
-			log.Println("S3 storage registered successfully")
+			log.Fatalf("Failed to initialize S3 storage: %v", err)
 		}
+		storage.Register("s3", s3Store)
+		log.Println("S3 storage registered successfully")
+	}
+
+	// The ClickHouse backend existed but was never registered, so
+	// storage_backend: clickhouse failed with "unknown storage backend" only
+	// after the SQL had already run.
+	if cfg.Storage.ClickHouse.DSN != "" {
+		chStore, err := clickhousestore.NewClickHouseResultStore(
+			cfg.Storage.ClickHouse.DSN,
+			cfg.Storage.ClickHouse.Table,
+		)
+		if err != nil {
+			log.Fatalf("Failed to initialize ClickHouse storage: %v", err)
+		}
+		storage.Register("clickhouse", chStore)
+		log.Println("ClickHouse storage registered successfully")
+		defer func() {
+			if err := chStore.Close(); err != nil {
+				log.Printf("ERROR: ClickHouse storage close failed: %v", err)
+			}
+		}()
+	}
+
+	// A default backend that was never registered would only surface as a
+	// failure after a query had already executed.
+	if _, err := storage.GetStore(cfg.Instance.DefaultStorage); err != nil {
+		log.Fatalf("Default storage backend %q is not available: %v", cfg.Instance.DefaultStorage, err)
 	}
 
 	// 4. Initialize Lifecycle and Managers
