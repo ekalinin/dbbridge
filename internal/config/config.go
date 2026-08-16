@@ -25,6 +25,24 @@ type InstanceConfig struct {
 type ServerConfig struct {
 	RESTAddr string `yaml:"rest_addr"`
 	GRPCAddr string `yaml:"grpc_addr"`
+	// MaxRequestBytes caps a JSON request body; default 1 MiB. Without it the
+	// SQL text of a submission is unbounded.
+	MaxRequestBytes int64 `yaml:"max_request_bytes"`
+	// RequestTimeout bounds ordinary HTTP operations; default 60s. Streaming
+	// routes (result download, sync submission, WebSocket) are exempt, they
+	// legitimately outlive it.
+	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// ReadHeaderTimeout and IdleTimeout protect both listeners from connections
+	// that open and then stall.
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
+	IdleTimeout       time.Duration `yaml:"idle_timeout"`
+	// WSAllowedOrigins lists the browser origins allowed to open a WebSocket.
+	// Empty means same-origin only.
+	WSAllowedOrigins []string `yaml:"ws_allowed_origins"`
+	// TrustedProxyCount is how many reverse proxies sit in front of the
+	// service. It decides which X-Forwarded-For entry is the real client; the
+	// header is forgeable everywhere else.
+	TrustedProxyCount int `yaml:"trusted_proxy_count"`
 }
 
 // DefaultsConfig defines global defaults for query execution parameters.
@@ -149,6 +167,18 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Server.GRPCAddr == "" {
 		cfg.Server.GRPCAddr = ":9090"
+	}
+	if cfg.Server.MaxRequestBytes == 0 {
+		cfg.Server.MaxRequestBytes = 1 << 20
+	}
+	if cfg.Server.RequestTimeout == 0 {
+		cfg.Server.RequestTimeout = 60 * time.Second
+	}
+	if cfg.Server.ReadHeaderTimeout == 0 {
+		cfg.Server.ReadHeaderTimeout = 10 * time.Second
+	}
+	if cfg.Server.IdleTimeout == 0 {
+		cfg.Server.IdleTimeout = 120 * time.Second
 	}
 	// Check databases
 	seen := make(map[string]bool)

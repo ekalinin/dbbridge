@@ -374,7 +374,19 @@ func TestStartQuery_UnknownDatabase(t *testing.T) {
 		Options:    map[string]any{},
 	})
 	defer resp.Body.Close()
-	assertStatus(t, resp, http.StatusInternalServerError)
+	// An unknown database is a client error, not a server fault. It used to be
+	// a 500 whose body carried the wrapped driver error, DSN included.
+	assertStatus(t, resp, http.StatusNotFound)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	for _, leak := range []string{"dsn", "password", "postgres://", "fake@"} {
+		if strings.Contains(strings.ToLower(string(body)), leak) {
+			t.Errorf("error body leaks %q: %s", leak, body)
+		}
+	}
 }
 
 func TestStartQuery_MissingFields(t *testing.T) {

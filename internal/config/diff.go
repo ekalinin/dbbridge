@@ -1,5 +1,7 @@
 package config
 
+import "reflect"
+
 // NonReloadableChanges lists the configuration sections that changed but cannot
 // be applied without a restart. The instance ID is captured by QueryManager at
 // construction, the MetaStore and the storage backends are built once in main,
@@ -12,13 +14,13 @@ func NonReloadableChanges(oldCfg, newCfg *Config) []string {
 	}
 
 	var ignored []string
-	if oldCfg.Instance != newCfg.Instance {
+	if !reflect.DeepEqual(oldCfg.Instance, newCfg.Instance) {
 		ignored = append(ignored, "instance")
 	}
-	if oldCfg.Server != newCfg.Server {
+	if !reflect.DeepEqual(oldCfg.Server, newCfg.Server) {
 		ignored = append(ignored, "server")
 	}
-	if oldCfg.Storage != newCfg.Storage {
+	if !reflect.DeepEqual(oldCfg.Storage, newCfg.Storage) {
 		ignored = append(ignored, "storage")
 	}
 	if oldCfg.Defaults.MaxConcurrentQueries != newCfg.Defaults.MaxConcurrentQueries {

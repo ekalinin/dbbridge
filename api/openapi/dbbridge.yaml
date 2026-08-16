@@ -84,8 +84,40 @@ paths:
                 $ref: "#/components/schemas/QueryRecord"
         "400":
           description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown database
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: Request body too large
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Too many concurrent queries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Instance is draining or the database is unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/queries/{id}:
     get:
@@ -103,6 +135,10 @@ paths:
                 $ref: "#/components/schemas/QueryRecord"
         "404":
           description: Query not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/queries/{id}:stop:
     post:
@@ -124,8 +160,18 @@ paths:
                   status:
                     type: string
                     example: STOPPED
+        "404":
+          description: Query not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/queries/{id}/stats:
     get:
@@ -143,6 +189,10 @@ paths:
                 $ref: "#/components/schemas/QueryStats"
         "404":
           description: Query not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/queries/{id}/result:
     get:
@@ -207,10 +257,36 @@ paths:
               schema:
                 type: string
                 format: binary
+        "400":
+          description: The query has not succeeded, so no result exists yet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Query or result not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "416":
-          description: Range not satisfiable
+          description: |
+            Range not satisfiable. The `Content-Range` header carries
+            `bytes */<total>`.
+          headers:
+            Content-Range:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/databases:
     get:
@@ -233,8 +309,14 @@ paths:
     get:
       summary: WebSocket endpoint for query event subscriptions
       description: |
-        Upgrade to WebSocket. After upgrade, send `{"action":"watch","query_id":"<id>"}` to subscribe.
+        Upgrade to WebSocket. After upgrade, send `{"action":"watch","query_id":"<id>"}` to subscribe
+        and `{"action":"unwatch","query_id":"<id>"}` to drop a subscription.
         The server streams `{"query_id":"...","state":"...","stats":{...},"error":null}` as state changes.
+
+        The current state is delivered immediately on subscribe, and the subscription is closed once
+        the query reaches a terminal state. A connection may hold at most 32 subscriptions; further
+        `watch` messages are answered with an error message. Cross-origin connections are refused
+        unless the origin is listed in `server.ws_allowed_origins`.
       operationId: wsSubscribe
       tags: [queries]
       responses:
@@ -258,8 +340,14 @@ paths:
                     type: boolean
                   message:
                     type: string
+                  report:
+                    $ref: "#/components/schemas/ReloadReport"
         "500":
           description: Reload failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/admin/can-stop:
     get:
@@ -321,6 +409,9 @@ components:
               type: string
               enum: [jsonl, csv]
               default: jsonl
+              description: |
+                Validated against this list before the query runs. `parquet` is
+                declared in the spec but not implemented, so it is rejected.
             storage_backend:
               type: string
               enum: [fs, s3, clickhouse]
@@ -356,6 +447,51 @@ components:
         finished_at:
           type: string
           format: date-time
+        lease_deadline:
+          type: string
+          format: date-time
+          description: Derived from the owner's lease key, absent once the query is terminal
+        idempotency_key:
+          type: string
+
+    Error:
+      type: object
+      description: |
+        The single error shape of the API. `error` carries the category and,
+        for input errors, the reason; internal detail stays in the server log,
+        keyed by `request_id`.
+      required: [error]
+      properties:
+        error:
+          type: string
+        request_id:
+          type: string
+
+    ReloadReport:
+      type: object
+      properties:
+        added:
+          type: array
+          items:
+            type: string
+        removed:
+          type: array
+          items:
+            type: string
+        updated:
+          type: array
+          items:
+            type: string
+        ignored:
+          type: array
+          description: Sections that changed but require a restart to take effect
+          items:
+            type: string
+        failures:
+          type: array
+          description: Databases whose pool could not be opened
+          items:
+            type: string
 
     QueryState:
       type: string

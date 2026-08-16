@@ -112,10 +112,21 @@ func main() {
 	svc := service.NewQueryService(qm, lm)
 
 	// 5. Initialize Servers
-	restServer := rest.NewServer(svc)
+	restServer := rest.NewServer(svc, rest.Options{
+		MaxRequestBytes:   cfg.Server.MaxRequestBytes,
+		RequestTimeout:    cfg.Server.RequestTimeout,
+		WSAllowedOrigins:  cfg.Server.WSAllowedOrigins,
+		TrustedProxyCount: cfg.Server.TrustedProxyCount,
+	})
 	restHTTP := &http.Server{
 		Addr:    cfg.Server.RESTAddr,
 		Handler: restServer.Handler(),
+		// No ReadTimeout or WriteTimeout: they would cut off long result
+		// downloads and WebSocket connections. The header and idle timeouts are
+		// what close Slowloris-style connections that open and then stall.
+		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+		IdleTimeout:       cfg.Server.IdleTimeout,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	// Setup gRPC Connect server
@@ -125,8 +136,11 @@ func main() {
 	grpcMux.Handle(path, handler)
 
 	grpcHTTP := &http.Server{
-		Addr:    cfg.Server.GRPCAddr,
-		Handler: grpcMux,
+		Addr:              cfg.Server.GRPCAddr,
+		Handler:           grpcMux,
+		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+		IdleTimeout:       cfg.Server.IdleTimeout,
+		MaxHeaderBytes:    1 << 20,
 	}
 	grpcHTTP.Protocols = new(http.Protocols)
 	grpcHTTP.Protocols.SetHTTP1(true)

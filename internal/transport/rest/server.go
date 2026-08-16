@@ -20,17 +20,50 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
+// Options carries the transport limits. Zero values fall back to the defaults
+// below, so tests and embedders can pass Options{}.
+type Options struct {
+	// MaxRequestBytes caps a JSON request body.
+	MaxRequestBytes int64
+	// RequestTimeout bounds ordinary HTTP operations. It is deliberately not
+	// applied to the streaming routes.
+	RequestTimeout time.Duration
+	// WSAllowedOrigins lists browser origins allowed to open a WebSocket.
+	WSAllowedOrigins []string
+	// TrustedProxyCount is the number of reverse proxies in front of this
+	// service; it decides which X-Forwarded-For entry is the real client.
+	TrustedProxyCount int
+}
+
+const (
+	defaultMaxRequestBytes = 1 << 20
+	defaultRequestTimeout  = 60 * time.Second
+)
+
+func (o Options) withDefaults() Options {
+	if o.MaxRequestBytes <= 0 {
+		o.MaxRequestBytes = defaultMaxRequestBytes
+	}
+	if o.RequestTimeout <= 0 {
+		o.RequestTimeout = defaultRequestTimeout
+	}
+	return o
+}
+
 type Server struct {
 	svc    *service.QueryService
 	wsHub  *ws.Hub
 	router chi.Router
+	opts   Options
 }
 
-func NewServer(svc *service.QueryService) *Server {
+func NewServer(svc *service.QueryService, opts Options) *Server {
+	opts = opts.withDefaults()
 	s := &Server{
 		svc:    svc,
-		wsHub:  ws.NewHub(svc),
+		wsHub:  ws.NewHub(svc, ws.Options{AllowedOrigins: opts.WSAllowedOrigins}),
 		router: chi.NewRouter(),
+		opts:   opts,
 	}
 	s.setupRoutes()
 	return s
@@ -42,26 +75,43 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) setupRoutes() {
 	s.router.Use(middleware.RequestID)
-	s.router.Use(middleware.ClientIPFromXFF())
+	// Without a hop count chi takes the right-most X-Forwarded-For entry, which
+	// is only the real client when exactly one trusted proxy sits in front of
+	// the service; in any other topology the header is attacker-controlled.
+	if s.opts.TrustedProxyCount > 0 {
+		s.router.Use(middleware.ClientIPFromXFFTrustedProxies(s.opts.TrustedProxyCount))
+	} else {
+		s.router.Use(middleware.ClientIPFromXFF())
+	}
 	s.router.Use(middleware.Logger)
 	s.router.Use(middleware.Recoverer)
-	s.router.Use(middleware.Timeout(60 * time.Second))
 
 	s.router.Get("/healthz", s.handleHealthz)
 	s.router.Get("/readyz", s.handleReadyz)
 	s.router.Handle("/metrics", telemetry.Handler())
 
 	s.router.Route("/v1", func(r chi.Router) {
-		r.Get("/databases", s.handleListDatabases)
-		r.Post("/queries", s.handleStartQuery)
-		r.Get("/queries/{id}", s.handleGetQueryStatus)
-		r.Post("/queries/{id}:stop", s.handleStopQuery)
-		r.Get("/queries/{id}/stats", s.handleGetQueryStats)
-		r.Get("/queries/{id}/result", s.handleDownloadResult)
-		r.Get("/ws", s.wsHub.ServeHTTP)
+		// Long-lived routes. A blanket middleware.Timeout used to cover these
+		// too: it cut result downloads and sync submissions off after a minute
+		// and killed every WebSocket connection at the same age.
+		r.Group(func(r chi.Router) {
+			r.Post("/queries", s.handleStartQuery)
+			r.Get("/queries/{id}/result", s.handleDownloadResult)
+			r.Get("/ws", s.wsHub.ServeHTTP)
+		})
 
-		r.Post("/admin/reload", s.handleReloadConfig)
-		r.Get("/admin/can-stop", s.handleCanIBeStopped)
+		// Ordinary request/response operations keep the timeout.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Timeout(s.opts.RequestTimeout))
+
+			r.Get("/databases", s.handleListDatabases)
+			r.Get("/queries/{id}", s.handleGetQueryStatus)
+			r.Post("/queries/{id}:stop", s.handleStopQuery)
+			r.Get("/queries/{id}/stats", s.handleGetQueryStats)
+
+			r.Post("/admin/reload", s.handleReloadConfig)
+			r.Get("/admin/can-stop", s.handleCanIBeStopped)
+		})
 	})
 }
 
@@ -96,18 +146,28 @@ type StartQueryPayload struct {
 }
 
 func (s *Server) handleStartQuery(w http.ResponseWriter, r *http.Request) {
+	// The SQL text is unbounded without this: a single request could otherwise
+	// buffer as much memory as the client cares to send.
+	r.Body = http.MaxBytesReader(w, r.Body, s.opts.MaxRequestBytes)
+
 	var payload StartQueryPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeStatus(w, r, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("request body exceeds %d bytes", s.opts.MaxRequestBytes))
+			return
+		}
+		writeValidationError(w, r, "body", "malformed JSON")
 		return
 	}
 
 	if payload.DatabaseID == "" {
-		http.Error(w, "database_id is required", http.StatusBadRequest)
+		writeValidationError(w, r, "database_id", "is required")
 		return
 	}
 	if payload.SQL == "" {
-		http.Error(w, "sql query is required", http.StatusBadRequest)
+		writeValidationError(w, r, "sql", "is required")
 		return
 	}
 
@@ -126,11 +186,7 @@ func (s *Server) handleStartQuery(w http.ResponseWriter, r *http.Request) {
 
 	record, err := s.svc.StartQuery(r.Context(), payload.DatabaseID, payload.SQL, opts)
 	if err != nil {
-		if drainErr, ok := errors.AsType[domain.DrainingError](err); ok {
-			http.Error(w, drainErr.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		http.Error(w, "failed to start query: "+err.Error(), http.StatusInternalServerError)
+		writeError(w, r, err)
 		return
 	}
 
@@ -140,36 +196,36 @@ func (s *Server) handleStartQuery(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.WriteHeader(http.StatusAccepted)
 	}
-	writeJSON(w, record)
+	writeJSON(w, toRecordDTO(record))
 }
 
 func (s *Server) handleGetQueryStatus(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
-		http.Error(w, "query id is required", http.StatusBadRequest)
+		writeValidationError(w, r, "id", "is required")
 		return
 	}
 
 	record, err := s.svc.GetQueryStatus(r.Context(), id)
 	if err != nil {
-		http.Error(w, "query not found: "+err.Error(), http.StatusNotFound)
+		writeError(w, r, err)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	writeJSON(w, record)
+	writeJSON(w, toRecordDTO(record))
 }
 
 func (s *Server) handleStopQuery(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
-		http.Error(w, "query id is required", http.StatusBadRequest)
+		writeValidationError(w, r, "id", "is required")
 		return
 	}
 
 	if err := s.svc.StopQuery(r.Context(), id); err != nil {
-		http.Error(w, "failed to stop query: "+err.Error(), http.StatusInternalServerError)
+		writeError(w, r, err)
 		return
 	}
 
@@ -184,25 +240,25 @@ func (s *Server) handleStopQuery(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetQueryStats(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
-		http.Error(w, "query id is required", http.StatusBadRequest)
+		writeValidationError(w, r, "id", "is required")
 		return
 	}
 
 	stats, err := s.svc.GetQueryStats(r.Context(), id)
 	if err != nil {
-		http.Error(w, "query stats not found: "+err.Error(), http.StatusNotFound)
+		writeError(w, r, err)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	writeJSON(w, stats)
+	writeJSON(w, toStatsDTO(stats))
 }
 
 func (s *Server) handleDownloadResult(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
-		http.Error(w, "query id is required", http.StatusBadRequest)
+		writeValidationError(w, r, "id", "is required")
 		return
 	}
 
@@ -213,7 +269,7 @@ func (s *Server) handleDownloadResult(w http.ResponseWriter, r *http.Request) {
 	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
 		start, end, ok := parseByteRange(rangeHeader)
 		if !ok {
-			http.Error(w, "invalid Range header", http.StatusRequestedRangeNotSatisfiable)
+			writeStatus(w, r, http.StatusRequestedRangeNotSatisfiable, "invalid Range header")
 			return
 		}
 		offset = start
@@ -226,14 +282,14 @@ func (s *Server) handleDownloadResult(w http.ResponseWriter, r *http.Request) {
 	} else {
 		var err error
 		if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
-			if offset, err = strconv.ParseInt(offsetStr, 10, 64); err != nil {
-				http.Error(w, "invalid offset: "+err.Error(), http.StatusBadRequest)
+			if offset, err = strconv.ParseInt(offsetStr, 10, 64); err != nil || offset < 0 {
+				writeValidationError(w, r, "offset", "must be a non-negative integer")
 				return
 			}
 		}
 		if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-			if limit, err = strconv.ParseInt(limitStr, 10, 64); err != nil {
-				http.Error(w, "invalid limit: "+err.Error(), http.StatusBadRequest)
+			if limit, err = strconv.ParseInt(limitStr, 10, 64); err != nil || limit < 0 {
+				writeValidationError(w, r, "limit", "must be a non-negative integer")
 				return
 			}
 		}
@@ -241,7 +297,7 @@ func (s *Server) handleDownloadResult(w http.ResponseWriter, r *http.Request) {
 
 	reader, ref, err := s.svc.DownloadResult(r.Context(), id, offset, limit)
 	if err != nil {
-		http.Error(w, "failed to download results: "+err.Error(), http.StatusInternalServerError)
+		writeError(w, r, err)
 		return
 	}
 	defer func() {
@@ -262,15 +318,18 @@ func (s *Server) handleDownloadResult(w http.ResponseWriter, r *http.Request) {
 
 	if useRange {
 		total := ref.SizeBytes
-		totalStr := "*"
-		if total > 0 {
-			totalStr = strconv.FormatInt(total, 10)
+		// A range that starts past the end is unsatisfiable, not a 206 with an
+		// empty body, and RFC 9110 requires the total in Content-Range here.
+		if total >= 0 && rangeStart >= total {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
+			writeStatus(w, r, http.StatusRequestedRangeNotSatisfiable, "range not satisfiable")
+			return
 		}
 		end := rangeEnd
-		if end < 0 || (total > 0 && end >= total) {
+		if end < 0 || end >= total {
 			end = total - 1
 		}
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%s", rangeStart, end, totalStr))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rangeStart, end, total))
 		w.WriteHeader(http.StatusPartialContent)
 	} else {
 		w.WriteHeader(http.StatusOK)
@@ -309,7 +368,7 @@ func parseByteRange(header string) (start, end int64, ok bool) {
 func (s *Server) handleListDatabases(w http.ResponseWriter, r *http.Request) {
 	dbs, err := s.svc.ListDatabases(r.Context())
 	if err != nil {
-		http.Error(w, "failed to list databases: "+err.Error(), http.StatusInternalServerError)
+		writeError(w, r, err)
 		return
 	}
 
@@ -320,16 +379,12 @@ func (s *Server) handleListDatabases(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
 	report, err := s.svc.ReloadConfig(r.Context())
-	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		writeJSON(w, map[string]any{
-			"success": false,
-			"message": err.Error(),
-		})
+		writeError(w, r, err)
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	writeJSON(w, map[string]any{
 		"success": true,
