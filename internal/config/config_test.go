@@ -69,6 +69,27 @@ instance:
 	}
 }
 
+// TestConfigRejectsEmptyAuthTokens: an auth section that resolves to no tokens
+// would start the process with the API open while the operator believes it is
+// protected.
+func TestConfigRejectsEmptyAuthTokens(t *testing.T) {
+	const body = `
+instance:
+  id: test
+  metastore: memory
+auth:
+  tokens: []
+databases: []
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := NewManager(path); err == nil {
+		t.Error("an empty auth.tokens list was accepted")
+	}
+}
+
 func TestConfigDiffDatabases(t *testing.T) {
 	oldCfg := &Config{
 		Databases: []DatabaseConfig{
@@ -110,10 +131,13 @@ func TestNonReloadableChanges(t *testing.T) {
 	changed := *base
 	changed.Instance.ID = "b"
 	changed.Server.RESTAddr = ":9999"
+	// Removing a leaked token has to be reported as ignored: the Authenticator
+	// is built once, so the token keeps working until the process restarts.
+	changed.Auth = &AuthConfig{Tokens: []AuthTokenConfig{{Subject: "a", Value: "v", Scopes: []string{"read"}}}}
 	changed.Defaults.MaxConcurrentQueries = 4
 
 	got := NonReloadableChanges(base, &changed)
-	want := []string{"instance", "server", "defaults.max_concurrent_queries"}
+	want := []string{"instance", "server", "auth", "defaults.max_concurrent_queries"}
 	if len(got) != len(want) {
 		t.Fatalf("NonReloadableChanges = %v, want %v", got, want)
 	}

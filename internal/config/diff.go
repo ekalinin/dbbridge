@@ -23,6 +23,12 @@ func NonReloadableChanges(oldCfg, newCfg *Config) []string {
 	if !reflect.DeepEqual(oldCfg.Storage, newCfg.Storage) {
 		ignored = append(ignored, "storage")
 	}
+	// The Authenticator is built once in main. Without this an operator who
+	// removes a leaked token and reloads is told the reload succeeded while the
+	// token keeps working until the process restarts.
+	if !reflect.DeepEqual(oldCfg.Auth, newCfg.Auth) {
+		ignored = append(ignored, "auth")
+	}
 	if oldCfg.Defaults.MaxConcurrentQueries != newCfg.Defaults.MaxConcurrentQueries {
 		ignored = append(ignored, "defaults.max_concurrent_queries")
 	}

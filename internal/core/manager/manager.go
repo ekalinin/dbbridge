@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ekalinin/dbbridge/internal/authn"
 	"github.com/ekalinin/dbbridge/internal/config"
 	"github.com/ekalinin/dbbridge/internal/core/domain"
 	"github.com/ekalinin/dbbridge/internal/db"
@@ -319,6 +320,15 @@ func idempotencySubmitTTL(opts domain.QueryOptions) time.Duration {
 	return opts.ResultTTL + 24*time.Hour
 }
 
+// scopedIdempotencyKey namespaces a client-chosen key by the subject that chose
+// it. Without the namespace the key is global per database, so a caller sending
+// somebody else's key gets their record back - SQL text, stats and result
+// locator - and can also squat on the key for its whole TTL. I3 only has to
+// hold within a subject.
+func scopedIdempotencyKey(subject, key string) string {
+	return subject + "\x00" + key
+}
+
 func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string, opts domain.QueryOptions) (*domain.QueryRecord, error) {
 	pool, exists := qm.lookupPool(dbID)
 	if !exists {
@@ -342,11 +352,16 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 	}
 
 	queryID := uuid.New().String()
+	// Stamped from the authenticated caller so the read paths can tell whose
+	// query this is, and so the idempotency key stays inside one subject.
+	// Empty when authentication is disabled.
+	subject := authn.SubjectFromContext(ctx)
+	idemKey := scopedIdempotencyKey(subject, opts.IdempotencyKey)
 
 	// Idempotency is resolved before Ping: a repeated submission has to return
 	// the same query ID even while the database is temporarily unreachable (I3).
 	if opts.IdempotencyKey != "" {
-		existing, err := qm.resolveIdempotency(ctx, dbID, opts, queryID)
+		existing, err := qm.resolveIdempotency(ctx, dbID, idemKey, opts, queryID)
 		if err != nil {
 			return nil, err
 		}
@@ -362,7 +377,7 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 		if opts.IdempotencyKey == "" {
 			return
 		}
-		if err := qm.metaStore.ReleaseIdempotency(context.WithoutCancel(ctx), dbID, opts.IdempotencyKey, queryID); err != nil {
+		if err := qm.metaStore.ReleaseIdempotency(context.WithoutCancel(ctx), dbID, idemKey, queryID); err != nil {
 			log.Printf("ERROR: failed to release idempotency key for query %s: %v", queryID, err)
 		}
 	}
@@ -409,6 +424,7 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 		OwnerInstanceID: qm.instanceID,
 		CreatedAt:       time.Now(),
 		IdempotencyKey:  opts.IdempotencyKey,
+		Subject:         subject,
 	}
 
 	if err := qm.metaStore.PutQuery(ctx, record); err != nil {
@@ -465,12 +481,13 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 	return &asyncSnapshot, nil
 }
 
-// resolveIdempotency claims the key for queryID. It returns a non-nil record
-// when the key is already held by a live query, which the caller returns as is.
-func (qm *QueryManager) resolveIdempotency(ctx context.Context, dbID string, opts domain.QueryOptions, queryID string) (*domain.QueryRecord, error) {
+// resolveIdempotency claims the subject-scoped key for queryID. It returns a
+// non-nil record when the key is already held by a live query, which the caller
+// returns as is.
+func (qm *QueryManager) resolveIdempotency(ctx context.Context, dbID, key string, opts domain.QueryOptions, queryID string) (*domain.QueryRecord, error) {
 	ttl := idempotencySubmitTTL(opts)
 
-	existingID, acquired, err := qm.metaStore.AcquireIdempotency(ctx, dbID, opts.IdempotencyKey, queryID, ttl)
+	existingID, acquired, err := qm.metaStore.AcquireIdempotency(ctx, dbID, key, queryID, ttl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to process idempotency: %w", err)
 	}
@@ -480,6 +497,13 @@ func (qm *QueryManager) resolveIdempotency(ctx context.Context, dbID string, opt
 
 	rec, err := qm.metaStore.GetQuery(ctx, existingID)
 	if err == nil {
+		// The key is scoped to the subject, so a match is the caller's own
+		// query. The check costs nothing and keeps StartQuery - the one read
+		// path that does not go through service.authorized - from ever being
+		// the way a record escapes its subject.
+		if aerr := authn.AuthorizeSubject(ctx, rec.Subject); aerr != nil {
+			return nil, domain.NotFoundError{Resource: "query", ID: existingID}
+		}
 		log.Printf("Idempotency match! Returning existing query ID %s", existingID)
 		return rec, nil
 	}
@@ -491,10 +515,10 @@ func (qm *QueryManager) resolveIdempotency(ctx context.Context, dbID string, opt
 	// build failed to roll the key back). Reclaim it instead of refusing the
 	// query for the rest of the TTL.
 	log.Printf("Idempotency key for database %s points at missing query %s; reclaiming", dbID, existingID)
-	if err := qm.metaStore.ReleaseIdempotency(ctx, dbID, opts.IdempotencyKey, existingID); err != nil {
+	if err := qm.metaStore.ReleaseIdempotency(ctx, dbID, key, existingID); err != nil {
 		return nil, fmt.Errorf("failed to reclaim idempotency key: %w", err)
 	}
-	existingID, acquired, err = qm.metaStore.AcquireIdempotency(ctx, dbID, opts.IdempotencyKey, queryID, ttl)
+	existingID, acquired, err = qm.metaStore.AcquireIdempotency(ctx, dbID, key, queryID, ttl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to process idempotency: %w", err)
 	}
@@ -711,7 +735,8 @@ func (qm *QueryManager) complete(rec *domain.QueryRecord, next domain.QueryState
 	// time is re-armed here to expire together with the result (I3).
 	if rec.IdempotencyKey != "" && rec.Options.ResultTTL > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := qm.metaStore.RefreshIdempotency(ctx, rec.DatabaseID, rec.IdempotencyKey, rec.ID, rec.Options.ResultTTL); err != nil {
+		key := scopedIdempotencyKey(rec.Subject, rec.IdempotencyKey)
+		if err := qm.metaStore.RefreshIdempotency(ctx, rec.DatabaseID, key, rec.ID, rec.Options.ResultTTL); err != nil {
 			log.Printf("ERROR: failed to align idempotency TTL for query %s: %v", rec.ID, err)
 		}
 		cancel()

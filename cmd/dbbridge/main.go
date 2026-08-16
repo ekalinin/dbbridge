@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ekalinin/dbbridge/internal/authn"
 	"github.com/ekalinin/dbbridge/internal/config"
 	"github.com/ekalinin/dbbridge/internal/core/manager"
 	"github.com/ekalinin/dbbridge/internal/core/service"
@@ -23,6 +24,8 @@ import (
 	"github.com/ekalinin/dbbridge/internal/transport/rest"
 
 	v1connect "github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1/dbbridgev1connect"
+
+	"connectrpc.com/connect"
 
 	// Register drivers statically
 	_ "github.com/ekalinin/dbbridge/internal/db/drivers/clickhouse"
@@ -111,12 +114,36 @@ func main() {
 
 	svc := service.NewQueryService(qm, lm)
 
-	// 5. Initialize Servers
+	// 5. Initialize authentication. A configured but unusable token list is a
+	// startup failure: coming up with the API open while the operator believes
+	// it is protected is the worst of the two outcomes.
+	var authenticator *authn.Authenticator
+	if cfg.Auth != nil {
+		specs := make([]authn.TokenSpec, 0, len(cfg.Auth.Tokens))
+		for _, t := range cfg.Auth.Tokens {
+			specs = append(specs, authn.TokenSpec{
+				Subject:  t.Subject,
+				Value:    t.Value,
+				ValueEnv: t.ValueEnv,
+				Scopes:   t.Scopes,
+			})
+		}
+		authenticator, err = authn.New(specs)
+		if err != nil {
+			log.Fatalf("Failed to initialize authentication: %v", err)
+		}
+		log.Printf("Authentication enabled with %d token(s)", len(specs))
+	}
+	svc.SetAuthRequired(authenticator != nil)
+
+	// 6. Initialize Servers
 	restServer := rest.NewServer(svc, rest.Options{
 		MaxRequestBytes:   cfg.Server.MaxRequestBytes,
 		RequestTimeout:    cfg.Server.RequestTimeout,
 		WSAllowedOrigins:  cfg.Server.WSAllowedOrigins,
 		TrustedProxyCount: cfg.Server.TrustedProxyCount,
+		Auth:              authenticator,
+		SeparateAdmin:     cfg.Server.AdminAddr != "",
 	})
 	restHTTP := &http.Server{
 		Addr:    cfg.Server.RESTAddr,
@@ -132,7 +159,11 @@ func main() {
 	// Setup gRPC Connect server
 	grpcHandler := grpcconnect.NewQueryHandler(svc)
 	grpcMux := http.NewServeMux()
-	path, handler := v1connect.NewQueryServiceHandler(grpcHandler)
+	var connectOpts []connect.HandlerOption
+	if authenticator != nil {
+		connectOpts = append(connectOpts, connect.WithInterceptors(grpcconnect.NewAuthInterceptor(authenticator)))
+	}
+	path, handler := v1connect.NewQueryServiceHandler(grpcHandler, connectOpts...)
 	grpcMux.Handle(path, handler)
 
 	grpcHTTP := &http.Server{
@@ -146,7 +177,18 @@ func main() {
 	grpcHTTP.Protocols.SetHTTP1(true)
 	grpcHTTP.Protocols.SetUnencryptedHTTP2(true)
 
-	// 6. Start Servers
+	var adminHTTP *http.Server
+	if h := restServer.AdminHandler(); h != nil {
+		adminHTTP = &http.Server{
+			Addr:              cfg.Server.AdminAddr,
+			Handler:           h,
+			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+			IdleTimeout:       cfg.Server.IdleTimeout,
+			MaxHeaderBytes:    1 << 20,
+		}
+	}
+
+	// 7. Start Servers
 	go func() {
 		log.Printf("Starting REST API on %s", cfg.Server.RESTAddr)
 		if err := restHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -161,7 +203,16 @@ func main() {
 		}
 	}()
 
-	// 7. Handle OS Signals (Graceful Reload & Shutdown)
+	if adminHTTP != nil {
+		go func() {
+			log.Printf("Starting metrics / admin API on %s", cfg.Server.AdminAddr)
+			if err := adminHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("Admin server failed: %v", err)
+			}
+		}()
+	}
+
+	// 8. Handle OS Signals (Graceful Reload & Shutdown)
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 
@@ -209,6 +260,11 @@ func main() {
 		}
 		if err := grpcHTTP.Shutdown(ctx); err != nil {
 			log.Printf("ERROR: gRPC server shutdown failed: %v", err)
+		}
+		if adminHTTP != nil {
+			if err := adminHTTP.Shutdown(ctx); err != nil {
+				log.Printf("ERROR: admin server shutdown failed: %v", err)
+			}
 		}
 		cancel()
 

@@ -1,4 +1,5 @@
 openapi: "3.1.0"
+
 info:
   title: dbbridge
   description: Fault-tolerant SQL proxy that executes queries asynchronously and persists results for later retrieval.
@@ -8,12 +9,16 @@ servers:
   - url: http://localhost:8080
     description: Local development
 
+security:
+  - bearerAuth: []
+
 paths:
   /healthz:
     get:
       summary: Liveness probe
       operationId: healthz
       tags: [health]
+      security: []
       responses:
         "200":
           description: Service is alive
@@ -28,6 +33,7 @@ paths:
       summary: Readiness probe
       operationId: readyz
       tags: [health]
+      security: []
       responses:
         "200":
           description: Service is ready to accept traffic
@@ -42,6 +48,10 @@ paths:
   /metrics:
     get:
       summary: Prometheus metrics
+      description: |
+        Served on `server.admin_addr` when that is configured, together with
+        `/v1/admin/*`; the metric labels enumerate every configured `db_id`, so
+        the route needs the `admin` scope wherever it is mounted.
       operationId: metrics
       tags: [health]
       responses:
@@ -51,6 +61,10 @@ paths:
             text/plain:
               schema:
                 type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/queries:
     post:
@@ -118,6 +132,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/queries/{id}:
     get:
@@ -139,6 +157,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/queries/{id}:stop:
     post:
@@ -172,6 +194,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/queries/{id}/stats:
     get:
@@ -193,6 +219,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/queries/{id}/result:
     get:
@@ -287,6 +317,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/databases:
     get:
@@ -304,6 +338,10 @@ paths:
                   $ref: "#/components/schemas/DatabaseInfo"
         "500":
           description: Internal error
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/ws:
     get:
@@ -317,11 +355,19 @@ paths:
         the query reaches a terminal state. A connection may hold at most 32 subscriptions; further
         `watch` messages are answered with an error message. Cross-origin connections are refused
         unless the origin is listed in `server.ws_allowed_origins`.
+
+        A browser cannot set the `Authorization` header on a handshake, so the credential may also
+        be offered as a subprotocol pair: `new WebSocket(url, ["dbbridge.bearer", token])`. The
+        server selects and echoes only `dbbridge.bearer`, never the token.
       operationId: wsSubscribe
       tags: [queries]
       responses:
         "101":
           description: Switching Protocols
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/admin/reload:
     post:
@@ -348,6 +394,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/admin/can-stop:
     get:
@@ -367,8 +417,49 @@ paths:
                     type: boolean
                   in_flight:
                     type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
 components:
+  responses:
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: The token lacks the scope this operation requires
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Static bearer token from `auth.tokens`. Each token carries a subject and
+        a set of scopes: `read` (status, stats, download, list, watch), `write`
+        (submit, stop) and `admin` (reload, can-stop, `/metrics`). `write`
+        implies `read`, so a token that submits a query can poll it and fetch
+        its result; `admin` implies both and can act across subjects, while
+        every other token only reaches the queries its own subject submitted.
+        Endpoints answer `401` without a valid token and `403` when the token
+        lacks the scope. The health probes are exempt.
+
+        Revoking a token requires a restart: `auth` is reported under
+        `report.ignored` by `POST /v1/admin/reload` rather than applied.
+
+        Turning authentication on binds new records to a subject but leaves
+        older ones with an empty one, and those are reachable only by `admin`.
+        Roll it out on an idle instance, or expect in-flight and retained
+        queries submitted before the switch to answer `404` to their owners
+        until `result_ttl` expires.
+
   parameters:
     queryId:
       name: id

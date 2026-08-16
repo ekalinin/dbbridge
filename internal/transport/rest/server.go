@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ekalinin/dbbridge/internal/authn"
 	"github.com/ekalinin/dbbridge/internal/core/domain"
 	"github.com/ekalinin/dbbridge/internal/core/service"
 	"github.com/ekalinin/dbbridge/internal/telemetry"
@@ -33,6 +34,12 @@ type Options struct {
 	// TrustedProxyCount is the number of reverse proxies in front of this
 	// service; it decides which X-Forwarded-For entry is the real client.
 	TrustedProxyCount int
+	// Auth enforces bearer tokens on the /v1 routes. A nil Authenticator
+	// leaves the API open, which NewServer logs about loudly.
+	Auth *authn.Authenticator
+	// SeparateAdmin moves /metrics and /v1/admin/* off the public router and
+	// onto AdminHandler.
+	SeparateAdmin bool
 }
 
 const (
@@ -51,10 +58,11 @@ func (o Options) withDefaults() Options {
 }
 
 type Server struct {
-	svc    *service.QueryService
-	wsHub  *ws.Hub
-	router chi.Router
-	opts   Options
+	svc         *service.QueryService
+	wsHub       *ws.Hub
+	router      chi.Router
+	adminRouter chi.Router
+	opts        Options
 }
 
 func NewServer(svc *service.QueryService, opts Options) *Server {
@@ -65,6 +73,9 @@ func NewServer(svc *service.QueryService, opts Options) *Server {
 		router: chi.NewRouter(),
 		opts:   opts,
 	}
+	if opts.Auth == nil {
+		log.Print("WARNING: no auth tokens configured, the API accepts unauthenticated requests")
+	}
 	s.setupRoutes()
 	return s
 }
@@ -73,31 +84,57 @@ func (s *Server) Handler() http.Handler {
 	return s.router
 }
 
-func (s *Server) setupRoutes() {
-	s.router.Use(middleware.RequestID)
+// AdminHandler serves /metrics and /v1/admin/*. It is non-nil only when
+// Options.SeparateAdmin is set; otherwise those routes live on Handler.
+func (s *Server) AdminHandler() http.Handler {
+	if s.adminRouter == nil {
+		return nil
+	}
+	return s.adminRouter
+}
+
+// useCommonMiddleware applies the middleware every router needs. The admin
+// router used to go without it, so admin errors carried no request ID, admin
+// requests were not logged at all, and a panic there reached the client as a
+// dropped connection instead of a 500.
+func (s *Server) useCommonMiddleware(r chi.Router) {
+	r.Use(middleware.RequestID)
 	// Without a hop count chi takes the right-most X-Forwarded-For entry, which
 	// is only the real client when exactly one trusted proxy sits in front of
 	// the service; in any other topology the header is attacker-controlled.
 	if s.opts.TrustedProxyCount > 0 {
-		s.router.Use(middleware.ClientIPFromXFFTrustedProxies(s.opts.TrustedProxyCount))
+		r.Use(middleware.ClientIPFromXFFTrustedProxies(s.opts.TrustedProxyCount))
 	} else {
-		s.router.Use(middleware.ClientIPFromXFF())
+		r.Use(middleware.ClientIPFromXFF())
 	}
-	s.router.Use(middleware.Logger)
-	s.router.Use(middleware.Recoverer)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+}
 
+func (s *Server) setupRoutes() {
+	s.useCommonMiddleware(s.router)
+
+	// The probes stay unauthenticated: kubelet and the load balancer call them
+	// and they expose nothing beyond serving state.
 	s.router.Get("/healthz", s.handleHealthz)
 	s.router.Get("/readyz", s.handleReadyz)
-	s.router.Handle("/metrics", telemetry.Handler())
 
 	s.router.Route("/v1", func(r chi.Router) {
+		// Default deny for the whole subtree, so a route added later cannot
+		// come out unauthenticated by omission. Groups below raise the bar
+		// where a route needs more than read; a write token satisfies read.
+		r.Use(s.require(authn.ScopeRead))
+
 		// Long-lived routes. A blanket middleware.Timeout used to cover these
 		// too: it cut result downloads and sync submissions off after a minute
 		// and killed every WebSocket connection at the same age.
 		r.Group(func(r chi.Router) {
-			r.Post("/queries", s.handleStartQuery)
 			r.Get("/queries/{id}/result", s.handleDownloadResult)
 			r.Get("/ws", s.wsHub.ServeHTTP)
+		})
+		r.Group(func(r chi.Router) {
+			r.Use(s.require(authn.ScopeWrite))
+			r.Post("/queries", s.handleStartQuery)
 		})
 
 		// Ordinary request/response operations keep the timeout.
@@ -106,12 +143,40 @@ func (s *Server) setupRoutes() {
 
 			r.Get("/databases", s.handleListDatabases)
 			r.Get("/queries/{id}", s.handleGetQueryStatus)
-			r.Post("/queries/{id}:stop", s.handleStopQuery)
 			r.Get("/queries/{id}/stats", s.handleGetQueryStats)
 
-			r.Post("/admin/reload", s.handleReloadConfig)
-			r.Get("/admin/can-stop", s.handleCanIBeStopped)
+			r.Group(func(r chi.Router) {
+				r.Use(s.require(authn.ScopeWrite))
+				r.Post("/queries/{id}:stop", s.handleStopQuery)
+			})
 		})
+	})
+
+	// /metrics enumerates every configured db_id and the admin routes reload
+	// the process, so they are gated on the admin scope wherever they live and
+	// can be moved off the public listener entirely.
+	if s.opts.SeparateAdmin {
+		s.adminRouter = chi.NewRouter()
+		s.useCommonMiddleware(s.adminRouter)
+		s.mountAdmin(s.adminRouter)
+		return
+	}
+	s.mountAdmin(s.router)
+}
+
+func (s *Server) mountAdmin(r chi.Router) {
+	r.Group(func(r chi.Router) {
+		r.Use(s.require(authn.ScopeAdmin))
+		// admin_addr is optional, so the default deployment has /metrics on the
+		// public listener. Leaving it open there hands out the full list of
+		// configured db_ids and the traffic volume per database.
+		r.Handle("/metrics", telemetry.Handler())
+	})
+	r.Route("/v1/admin", func(r chi.Router) {
+		r.Use(middleware.Timeout(s.opts.RequestTimeout))
+		r.Use(s.require(authn.ScopeAdmin))
+		r.Post("/reload", s.handleReloadConfig)
+		r.Get("/can-stop", s.handleCanIBeStopped)
 	})
 }
 

@@ -19,6 +19,15 @@ import (
 // loop could grow goroutines and memory without limit.
 const maxSubscriptionsPerConn = 32
 
+// BearerSubprotocol carries a credential through the WebSocket handshake. The
+// browser WebSocket API cannot set request headers, so a page authenticates by
+// offering the marker and the token as subprotocols:
+//
+//	new WebSocket(url, ["dbbridge.bearer", token])
+//
+// The server echoes only the marker back, never the token.
+const BearerSubprotocol = "dbbridge.bearer"
+
 // Options configures the hub.
 type Options struct {
 	// AllowedOrigins lists the browser origins allowed to open a connection.
@@ -65,6 +74,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// other people's query events (cross-site WebSocket hijacking).
 	opts := &websocket.AcceptOptions{
 		OriginPatterns: h.opts.AllowedOrigins,
+		// Accept the credential marker so a browser handshake that carries a
+		// token is not rejected for offering a subprotocol the server does not
+		// know. Only the marker is selected, so the token never comes back.
+		Subprotocols: []string{BearerSubprotocol},
 	}
 
 	wsConn, err := websocket.Accept(w, r, opts)

@@ -164,6 +164,11 @@ type QueryRecord struct {
 	Result          *ResultRef   `json:"result,omitzero"`
 	IdempotencyKey  string       `json:"idempotency_key,omitempty"`
 	LeaseDeadline   time.Time    `json:"lease_deadline,omitzero"`
+	// Subject is the authenticated caller that submitted the query. Knowing a
+	// query ID used to be enough to read anyone's SQL, status and result; the
+	// subject is what the read paths check against. Records written before
+	// subject binding have it empty, which only the admin scope can reach.
+	Subject string `json:"subject,omitempty"`
 }
 
 // DatabaseInfo represents static configuration and status metadata of a target database.

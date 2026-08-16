@@ -43,6 +43,27 @@ type ServerConfig struct {
 	// service. It decides which X-Forwarded-For entry is the real client; the
 	// header is forgeable everywhere else.
 	TrustedProxyCount int `yaml:"trusted_proxy_count"`
+	// AdminAddr, when set, moves /metrics and /v1/admin/* to their own
+	// listener. /metrics enumerates every configured db_id and the admin
+	// routes reload the process, so neither belongs on the public port.
+	AdminAddr string `yaml:"admin_addr"`
+}
+
+// AuthConfig configures API authentication. A nil pointer means the section is
+// absent and the API is unauthenticated; an empty token list is a mistake and
+// fails validation rather than starting up open.
+type AuthConfig struct {
+	Tokens []AuthTokenConfig `yaml:"tokens"`
+}
+
+// AuthTokenConfig is one static bearer token.
+type AuthTokenConfig struct {
+	Subject string `yaml:"subject"`
+	// Value holds the token inline. Prefer ValueEnv: a value here ends up in
+	// the config file, and in Kubernetes that means a ConfigMap.
+	Value    string   `yaml:"value"`
+	ValueEnv string   `yaml:"value_env"`
+	Scopes   []string `yaml:"scopes"` // read | write | admin
 }
 
 // DefaultsConfig defines global defaults for query execution parameters.
@@ -98,6 +119,7 @@ type DatabaseConfig struct {
 type Config struct {
 	Instance  InstanceConfig   `yaml:"instance"`
 	Server    ServerConfig     `yaml:"server"`
+	Auth      *AuthConfig      `yaml:"auth"`
 	Defaults  DefaultsConfig   `yaml:"defaults"`
 	Storage   StorageConfig    `yaml:"storage"`
 	Databases []DatabaseConfig `yaml:"databases"`
@@ -179,6 +201,11 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Server.IdleTimeout == 0 {
 		cfg.Server.IdleTimeout = 120 * time.Second
+	}
+	// An auth section that resolves to no tokens would start the process with
+	// the API wide open while the operator believes it is protected.
+	if cfg.Auth != nil && len(cfg.Auth.Tokens) == 0 {
+		return fmt.Errorf("auth is configured but auth.tokens is empty")
 	}
 	// Check databases
 	seen := make(map[string]bool)
