@@ -1308,7 +1308,7 @@ type CanIBeStoppedResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	CanBeStopped  bool                   `protobuf:"varint,1,opt,name=can_be_stopped,json=canBeStopped,proto3" json:"can_be_stopped,omitempty"`
 	InFlightCount int32                  `protobuf:"varint,2,opt,name=in_flight_count,json=inFlightCount,proto3" json:"in_flight_count,omitempty"`
-	// SERVING | DRAINING | STOPPABLE, see spec section 9.
+	// SERVING | DRAINING | STOPPABLE, see spec section 10.
 	InstanceState string `protobuf:"bytes,3,opt,name=instance_state,json=instanceState,proto3" json:"instance_state,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

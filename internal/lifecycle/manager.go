@@ -11,7 +11,7 @@ const (
 	// StateDraining rejects new queries while the owned ones finish.
 	StateDraining State = "DRAINING"
 	// StateStoppable is reached once a draining instance has zero in-flight
-	// owned queries: the orchestrator may terminate it (I5, spec §9).
+	// owned queries: the orchestrator may terminate it (I5, spec §10).
 	StateStoppable State = "STOPPABLE"
 )
 

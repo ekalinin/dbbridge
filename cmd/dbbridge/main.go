@@ -308,7 +308,7 @@ func main() {
 		for {
 			inFlight := qm.CountInFlight(context.Background())
 			// Publishes the DRAINING -> STOPPABLE transition, which is what
-			// /v1/admin/can-stop reports to the orchestrator (spec §9).
+			// /v1/admin/can-stop reports to the orchestrator (spec §10).
 			lm.Advance(inFlight)
 			if inFlight == 0 {
 				log.Println("0 owned active queries remaining. Safe to stop.")

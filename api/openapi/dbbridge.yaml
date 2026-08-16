@@ -423,7 +423,7 @@ paths:
                     description: |
                       Lifecycle state of this instance. A draining instance
                       advances to STOPPABLE once it holds zero in-flight owned
-                      queries (spec section 9).
+                      queries (spec section 10).
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

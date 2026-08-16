@@ -11,7 +11,8 @@ GO_BUILD      := CGO_ENABLED=0 go build $(LDFLAGS)
 
 .PHONY: all build clean run \
         proto proto-lint \
-        test test-unit test-integration test-e2e test-all test-race \
+        test test-unit test-integration test-containers test-e2e test-all test-race \
+        vulncheck \
         lint vet fmt fmt-check check ci \
         docker-build docker-push \
         up down logs restart \
@@ -51,6 +52,11 @@ test-unit:
 test-integration:
 	go test ./internal/... -count=1 -timeout 120s
 
+# Real backends in containers (Redis, PostgreSQL, MySQL, MinIO).
+# Requires a Docker daemon; skipped by every other target via the build tag.
+test-containers:
+	go test -race -tags=integration ./test/integration/... -count=1 -timeout 900s
+
 test-e2e:
 	go test ./test/e2e/... -count=1 -timeout 300s
 
@@ -63,11 +69,23 @@ test-race:
 
 # ── Quality ──────────────────────────────────────────────────────────────────
 
+# Pinned rather than @latest: an unpinned tool version makes CI fail on a
+# release of the tool with no change in this repository, and runs unreviewed
+# code from the network on every build.
+GOVULNCHECK_VERSION ?= v1.1.4
+
+vulncheck:
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
 lint:
 	golangci-lint run ./...
 
+# The integration package is cut out by its build tag, and a package whose files
+# are all cut out is skipped by ./... without a word, so those files would
+# otherwise not be vetted or compiled outside the container job.
 vet:
 	go vet ./...
+	go vet -tags=integration ./test/integration/...
 
 fmt:
 	gofmt -l -w .
@@ -78,8 +96,9 @@ fmt-check:
 
 check: vet lint
 
-# The CI workflow runs these same targets, one per step.
-ci: fmt-check vet test-all test-race lint proto-lint
+# The CI workflow runs these same targets, one per step, plus test-containers in
+# a job of its own - that one needs a Docker daemon, so it is not part of `ci`.
+ci: fmt-check vet test-all test-race lint proto-lint vulncheck
 
 # ── Docker ───────────────────────────────────────────────────────────────────
 

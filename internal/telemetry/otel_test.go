@@ -48,7 +48,7 @@ func TestHandler_ServesMetrics(t *testing.T) {
 		t.Error("expected baseline Go runtime metrics (go_goroutines) in output")
 	}
 	// go_sched_latencies_seconds is only exposed by a GoCollector backed by the
-	// full runtime/metrics ruleset, not the legacy default collector (spec §10).
+	// full runtime/metrics ruleset, not the legacy default collector (spec §11).
 	if !strings.Contains(out, "go_sched_latencies_seconds") {
 		t.Error("expected runtime/metrics-backed metric (go_sched_latencies_seconds) in output")
 	}

@@ -8,14 +8,16 @@ An asynchronous SQL proxy that accepts a query, executes it in the background ag
 - **Multi-node** — any instance can serve reads; Redis coordinates ownership and cross-instance cancellation
 - **Idempotent** — duplicate submissions with the same `Idempotency-Key` within the result TTL return the same `query_id`
 - **Hot-reload** — config reloads at runtime via `SIGHUP` or `POST /v1/admin/reload` without dropping in-flight queries
-- **Graceful drain** — SIGTERM switches to draining mode; `GET /v1/admin/can-stop` signals zero in-flight to the orchestrator
+- **Graceful drain** — SIGTERM switches to draining mode; `GET /v1/admin/can-stop` reports `SERVING` / `DRAINING` / `STOPPABLE` and zero in-flight to the orchestrator
+- **Authenticated** — static bearer tokens with `read` / `write` / `admin` scopes; a query is only readable by the subject that submitted it
+- **Read-only by default** — DML and DDL are rejected before they reach the database
 
 ## Supported backends
 
 | Category | Options |
 |---|---|
 | Databases | PostgreSQL, MySQL, ClickHouse, Oracle |
-| Result storage | Local filesystem, S3 / MinIO |
+| Result storage | Local filesystem, S3 / MinIO, ClickHouse |
 | MetaStore | Redis (multi-node), in-memory (single-node) |
 | Result formats | JSONL (default), CSV, Parquet |
 
@@ -64,12 +66,29 @@ Three transports, all backed by the same `QueryService`:
 | `GET` | `/v1/ws` | WebSocket — subscribe to query state events |
 | `POST` | `/v1/admin/reload` | Hot-reload config |
 | `GET` | `/v1/admin/can-stop` | Drain signal for orchestrator |
-| `GET` | `/healthz`, `/readyz`, `/metrics` | Health and Prometheus metrics |
+| `GET` | `/healthz`, `/readyz` | Liveness and readiness, unauthenticated |
+| `GET` | `/metrics` | Prometheus metrics; `admin` scope; moves to `server.admin_addr` when set |
+
+`/v1` routes and `/metrics` require a bearer token when `auth.tokens` is
+configured: `read` for status, stats, download, list and watch; `write` for
+submit and stop; `admin` for the two `/v1/admin` routes and for `/metrics`,
+whose labels enumerate every configured `db_id`. `write` implies `read` and
+`admin` implies both. `/v1/admin/*` and `/metrics` move to a separate listener
+when `server.admin_addr` is set, which is network isolation rather than
+authorization: the scope is still required there.
+
+A browser cannot set the `Authorization` header on a WebSocket handshake, so
+`/v1/ws` also accepts the credential as a subprotocol pair:
+`new WebSocket(url, ["dbbridge.bearer", token])`.
+
+Revoking a token needs a restart: `auth` is listed under `report.ignored` by a
+reload rather than applied.
 
 Submit a query:
 
 ```bash
 curl -X POST http://localhost:8080/v1/queries \
+  -H "Authorization: Bearer $DBBRIDGE_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: my-key-001" \
   -d '{"database_id": "pg_main", "sql": "SELECT count(*) FROM orders"}'
@@ -79,8 +98,8 @@ curl -X POST http://localhost:8080/v1/queries \
 Poll until done, then download:
 
 ```bash
-curl http://localhost:8080/v1/queries/{id}
-curl http://localhost:8080/v1/queries/{id}/result
+curl -H "Authorization: Bearer $DBBRIDGE_TOKEN" http://localhost:8080/v1/queries/{id}
+curl -H "Authorization: Bearer $DBBRIDGE_TOKEN" http://localhost:8080/v1/queries/{id}/result
 ```
 
 Watch via WebSocket:
@@ -91,7 +110,7 @@ websocat "ws://localhost:8080/v1/ws?query_id={id}"
 
 ### gRPC / Connect (`:9090`)
 
-Same operations over gRPC-Connect (HTTP/1.1 + HTTP/2, no TLS required locally). Proto definition: [`api/proto/dbbridge/v1/dbbridge.proto`](api/proto/dbbridge/v1/dbbridge.proto). OpenAPI spec: [`api/openapi/dbbridge.yaml`](api/openapi/dbbridge.yaml).
+Same operations over gRPC-Connect (HTTP/1.1 + HTTP/2). Without `server.tls` it runs as cleartext HTTP/2, which has to be acknowledged with `server.tls.allow_h2c`. Proto definition: [`api/proto/dbbridge/v1/dbbridge.proto`](api/proto/dbbridge/v1/dbbridge.proto). OpenAPI spec: [`api/openapi/dbbridge.yaml`](api/openapi/dbbridge.yaml).
 
 ## Query lifecycle
 
@@ -110,6 +129,8 @@ PENDING → RUNNING → SUCCEEDED
 make build          # compile → bin/dbbridge
 make test-unit      # go test ./internal/... -short
 make test-integration  # requires live DBs and Redis (make up first)
+make test-containers   # real Redis/PostgreSQL/MySQL/MinIO via testcontainers
+make vulncheck      # govulncheck
 make lint           # golangci-lint
 make check          # vet + lint
 make proto          # regenerate internal/gen/ from proto
@@ -123,6 +144,8 @@ api/
   proto/            protobuf definitions
   openapi/          OpenAPI 3 spec
 internal/
+  authn/            bearer tokens, scopes, request identity
+  sqlguard/         read-only statement guard
   core/
     domain/         QueryRecord, state machine, QueryOptions, ResultRef
     manager/        async execution, heartbeat/GC workers
@@ -139,6 +162,9 @@ internal/
   telemetry/        Prometheus metrics + OpenTelemetry traces
 configs/            local dev config (memory metastore + fs storage)
 deploy/             Dockerfile, docker-compose, k8s manifests
+test/
+  e2e/              REST end-to-end with fakes
+  integration/      real backends under testcontainers (build tag: integration)
 ```
 
 ## Stack

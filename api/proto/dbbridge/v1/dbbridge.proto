@@ -149,7 +149,7 @@ message CanIBeStoppedRequest {}
 message CanIBeStoppedResponse {
   bool can_be_stopped = 1;
   int32 in_flight_count = 2;
-  // SERVING | DRAINING | STOPPABLE, see spec section 9.
+  // SERVING | DRAINING | STOPPABLE, see spec section 10.
   string instance_state = 3;
 }
 

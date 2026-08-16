@@ -962,7 +962,7 @@ func (qm *QueryManager) StopQuery(ctx context.Context, queryID string) error {
 // of the local registry and the MetaStore's view: after a restart under the
 // same instance ID the registry is empty while records owned by this ID are
 // still marked active, and reporting zero there would let an orchestrator stop
-// a node that has not quiesced (I5, spec §9).
+// a node that has not quiesced (I5, spec §10).
 func (qm *QueryManager) CountInFlight(ctx context.Context) int {
 	qm.activeRegMu.RLock()
 	local := len(qm.activeReg)

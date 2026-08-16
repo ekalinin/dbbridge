@@ -24,7 +24,7 @@ import (
 // nothing reached OTLP. There is one source of truth now: the instruments are
 // OTel, and Prometheus is one of the readers behind them, which keeps /metrics
 // serving the same metric names. Go runtime metrics stay on the Prometheus
-// collector, which is what exposes the full runtime/metrics ruleset (spec §10).
+// collector, which is what exposes the full runtime/metrics ruleset (spec §11).
 
 const meterName = "github.com/ekalinin/dbbridge"
 
@@ -78,7 +78,7 @@ func mustFloat64Histogram(name, unit, desc string) metric.Float64Histogram {
 }
 
 func init() {
-	// Spec §10: export Go runtime metrics via the runtime/metrics package.
+	// Spec §11: export Go runtime metrics via the runtime/metrics package.
 	// The default registry pre-registers a legacy (MemStats-based) Go collector;
 	// replace it with one backed by the full runtime/metrics ruleset.
 	prometheus.Unregister(collectors.NewGoCollector())

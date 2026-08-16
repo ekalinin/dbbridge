@@ -184,11 +184,11 @@ func (s *QueryService) ReloadConfig(ctx context.Context) (domain.ReloadReport, e
 // CanIBeStopped reports whether the orchestrator may terminate this instance.
 // The count comes from the MetaStore as well as the local registry, so a node
 // restarted under the same instance ID does not claim to be quiesced while
-// records it owns are still marked in-flight (I5, spec §9).
+// records it owns are still marked in-flight (I5, spec §10).
 func (s *QueryService) CanIBeStopped(ctx context.Context) (bool, int, lifecycle.State) {
 	inFlight := s.qm.CountInFlight(ctx)
 	// A draining instance with nothing left in flight advances to STOPPABLE,
-	// the third lifecycle state the spec defines (§9).
+	// the third lifecycle state the spec defines (§10).
 	st := s.lifecycle.Advance(inFlight)
 	return inFlight == 0, inFlight, st
 }
