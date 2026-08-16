@@ -459,12 +459,13 @@ func (s *Server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCanIBeStopped(w http.ResponseWriter, r *http.Request) {
-	canStop, inFlight := s.svc.CanIBeStopped(r.Context())
+	canStop, inFlight, st := s.svc.CanIBeStopped(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	writeJSON(w, map[string]any{
 		"can_be_stopped": canStop,
 		"in_flight":      inFlight,
+		"instance_state": string(st),
 	})
 }
 

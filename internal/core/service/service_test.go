@@ -126,9 +126,23 @@ func TestListDatabases(t *testing.T) {
 }
 
 func TestCanIBeStopped(t *testing.T) {
-	svc, _ := testutil.NewService(t)
-	canStop, inFlight := svc.CanIBeStopped(context.Background())
+	svc, lm := testutil.NewService(t)
+	canStop, inFlight, st := svc.CanIBeStopped(context.Background())
 	if !canStop || inFlight != 0 {
 		t.Errorf("can_stop=%v in_flight=%d, want true/0", canStop, inFlight)
+	}
+	if st != lifecycle.StateServing {
+		t.Errorf("instance state = %s, want SERVING", st)
+	}
+
+	// A draining instance with nothing in flight advances to STOPPABLE, the
+	// third lifecycle state the spec defines but that was never reachable.
+	lm.SetState(lifecycle.StateDraining)
+	_, _, st = svc.CanIBeStopped(context.Background())
+	if st != lifecycle.StateStoppable {
+		t.Errorf("instance state = %s, want STOPPABLE", st)
+	}
+	if !svc.IsDraining() {
+		t.Error("a STOPPABLE instance must still read as draining for readiness")
 	}
 }

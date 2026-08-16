@@ -61,6 +61,7 @@ type queryRecordDTO struct {
 	Stats           queryStatsDTO   `json:"stats"`
 	Result          *resultRefDTO   `json:"result,omitempty"`
 	IdempotencyKey  string          `json:"idempotency_key,omitempty"`
+	Subject         string          `json:"subject,omitempty"`
 }
 
 // optionalTime maps a zero time.Time to an omitted field instead of to the year
@@ -112,6 +113,7 @@ func toRecordDTO(r *domain.QueryRecord) *queryRecordDTO {
 		LeaseDeadline:   optionalTime(r.LeaseDeadline),
 		Stats:           toStatsDTO(r.Stats),
 		IdempotencyKey:  r.IdempotencyKey,
+		Subject:         r.Subject,
 	}
 
 	if r.Error != nil {

@@ -280,6 +280,9 @@ func main() {
 		shutdownDeadline := time.Now().Add(30 * time.Second)
 		for {
 			inFlight := qm.CountInFlight(context.Background())
+			// Publishes the DRAINING -> STOPPABLE transition, which is what
+			// /v1/admin/can-stop reports to the orchestrator (spec §9).
+			lm.Advance(inFlight)
 			if inFlight == 0 {
 				log.Println("0 owned active queries remaining. Safe to stop.")
 				break

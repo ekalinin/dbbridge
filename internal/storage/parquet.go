@@ -42,7 +42,7 @@ type parquetColumn struct {
 // data one. And duplicate column names, which SQL allows, are disambiguated
 // with a numeric suffix, because a parquet schema cannot hold two fields of the
 // same name.
-func encodeParquet(ctx context.Context, stream db.RowStream, columns []string, cw *CountingWriter) (int64, error) {
+func encodeParquet(ctx context.Context, stream db.RowStream, columns []string, cw *CountingWriter, report func(rows int64)) (int64, error) {
 	names := uniqueColumnNames(columns)
 
 	scanArgs := make([]any, len(columns))
@@ -111,6 +111,7 @@ func encodeParquet(ctx context.Context, stream db.RowStream, columns []string, c
 				return fmt.Errorf("failed to flush parquet row group: %w", err)
 			}
 		}
+		report(rowCount)
 		return nil
 	}
 

@@ -185,9 +185,17 @@ func (s *QueryService) ReloadConfig(ctx context.Context) (domain.ReloadReport, e
 // The count comes from the MetaStore as well as the local registry, so a node
 // restarted under the same instance ID does not claim to be quiesced while
 // records it owns are still marked in-flight (I5, spec §9).
-func (s *QueryService) CanIBeStopped(ctx context.Context) (bool, int) {
+func (s *QueryService) CanIBeStopped(ctx context.Context) (bool, int, lifecycle.State) {
 	inFlight := s.qm.CountInFlight(ctx)
-	return inFlight == 0, inFlight
+	// A draining instance with nothing left in flight advances to STOPPABLE,
+	// the third lifecycle state the spec defines (§9).
+	st := s.lifecycle.Advance(inFlight)
+	return inFlight == 0, inFlight, st
+}
+
+// InstanceState reports the lifecycle state of this instance.
+func (s *QueryService) InstanceState() lifecycle.State {
+	return s.lifecycle.GetState()
 }
 
 // IsDraining reports whether the instance is draining. The readiness probe uses

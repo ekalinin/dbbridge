@@ -417,6 +417,13 @@ paths:
                     type: boolean
                   in_flight:
                     type: integer
+                  instance_state:
+                    type: string
+                    enum: [SERVING, DRAINING, STOPPABLE]
+                    description: |
+                      Lifecycle state of this instance. A draining instance
+                      advances to STOPPABLE once it holds zero in-flight owned
+                      queries (spec section 9).
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -544,6 +551,9 @@ components:
           description: Derived from the owner's lease key, absent once the query is terminal
         idempotency_key:
           type: string
+        subject:
+          type: string
+          description: Authenticated caller that submitted the query
 
     Error:
       type: object

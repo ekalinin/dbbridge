@@ -410,8 +410,11 @@ type QueryRecord struct {
 	Result          *ResultRef             `protobuf:"bytes,12,opt,name=result,proto3" json:"result,omitempty"`
 	IdempotencyKey  string                 `protobuf:"bytes,13,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	LeaseDeadlineMs int64                  `protobuf:"varint,14,opt,name=lease_deadline_ms,json=leaseDeadlineMs,proto3" json:"lease_deadline_ms,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Authenticated caller that submitted the query; empty when authentication
+	// is disabled or for records written before subject binding.
+	Subject       string `protobuf:"bytes,15,opt,name=subject,proto3" json:"subject,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *QueryRecord) Reset() {
@@ -540,6 +543,13 @@ func (x *QueryRecord) GetLeaseDeadlineMs() int64 {
 		return x.LeaseDeadlineMs
 	}
 	return 0
+}
+
+func (x *QueryRecord) GetSubject() string {
+	if x != nil {
+		return x.Subject
+	}
+	return ""
 }
 
 type DatabaseInfo struct {
@@ -1298,6 +1308,8 @@ type CanIBeStoppedResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	CanBeStopped  bool                   `protobuf:"varint,1,opt,name=can_be_stopped,json=canBeStopped,proto3" json:"can_be_stopped,omitempty"`
 	InFlightCount int32                  `protobuf:"varint,2,opt,name=in_flight_count,json=inFlightCount,proto3" json:"in_flight_count,omitempty"`
+	// SERVING | DRAINING | STOPPABLE, see spec section 9.
+	InstanceState string `protobuf:"bytes,3,opt,name=instance_state,json=instanceState,proto3" json:"instance_state,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1344,6 +1356,13 @@ func (x *CanIBeStoppedResponse) GetInFlightCount() int32 {
 		return x.InFlightCount
 	}
 	return 0
+}
+
+func (x *CanIBeStoppedResponse) GetInstanceState() string {
+	if x != nil {
+		return x.InstanceState
+	}
+	return ""
 }
 
 type WatchQueryRequest struct {
@@ -1491,7 +1510,7 @@ const file_dbbridge_v1_dbbridge_proto_rawDesc = "" +
 	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\x12\x1b\n" +
 	"\trow_count\x18\x04 \x01(\x03R\browCount\x12\x16\n" +
 	"\x06format\x18\x05 \x01(\tR\x06format\x12\x1a\n" +
-	"\bchecksum\x18\x06 \x01(\tR\bchecksum\"\xb1\x04\n" +
+	"\bchecksum\x18\x06 \x01(\tR\bchecksum\"\xcb\x04\n" +
 	"\vQueryRecord\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
 	"\vdatabase_id\x18\x02 \x01(\tR\n" +
@@ -1508,7 +1527,8 @@ const file_dbbridge_v1_dbbridge_proto_rawDesc = "" +
 	"\x05stats\x18\v \x01(\v2\x17.dbbridge.v1.QueryStatsR\x05stats\x12.\n" +
 	"\x06result\x18\f \x01(\v2\x16.dbbridge.v1.ResultRefR\x06result\x12'\n" +
 	"\x0fidempotency_key\x18\r \x01(\tR\x0eidempotencyKey\x12*\n" +
-	"\x11lease_deadline_ms\x18\x0e \x01(\x03R\x0fleaseDeadlineMs\"s\n" +
+	"\x11lease_deadline_ms\x18\x0e \x01(\x03R\x0fleaseDeadlineMs\x12\x18\n" +
+	"\asubject\x18\x0f \x01(\tR\asubject\"s\n" +
 	"\fDatabaseInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06engine\x18\x02 \x01(\tR\x06engine\x12!\n" +
@@ -1548,10 +1568,11 @@ const file_dbbridge_v1_dbbridge_proto_rawDesc = "" +
 	"\x14ReloadConfigResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\"\x16\n" +
-	"\x14CanIBeStoppedRequest\"e\n" +
+	"\x14CanIBeStoppedRequest\"\x8c\x01\n" +
 	"\x15CanIBeStoppedResponse\x12$\n" +
 	"\x0ecan_be_stopped\x18\x01 \x01(\bR\fcanBeStopped\x12&\n" +
-	"\x0fin_flight_count\x18\x02 \x01(\x05R\rinFlightCount\".\n" +
+	"\x0fin_flight_count\x18\x02 \x01(\x05R\rinFlightCount\x12%\n" +
+	"\x0einstance_state\x18\x03 \x01(\tR\rinstanceState\".\n" +
 	"\x11WatchQueryRequest\x12\x19\n" +
 	"\bquery_id\x18\x01 \x01(\tR\aqueryId\"\xbc\x01\n" +
 	"\x12WatchQueryResponse\x12\x19\n" +

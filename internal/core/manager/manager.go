@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ekalinin/dbbridge/internal/authn"
@@ -56,6 +57,25 @@ const (
 
 	// watcherBuffer is the per-subscription event buffer.
 	watcherBuffer = 20
+
+	// eventPublishBuffer bounds the queue of events waiting to be published to
+	// the other instances. Publishing must never stall query execution, so the
+	// queue is drained by its own goroutine and overflow is dropped.
+	eventPublishBuffer = 256
+
+	// eventPublishTimeout bounds one publish. eventPublishTerminalWait is how
+	// long a terminal event waits for room in the queue instead of being
+	// dropped, and eventDrainTimeout how long shutdown spends emptying it.
+	eventPublishTimeout      = 5 * time.Second
+	eventPublishTerminalWait = 5 * time.Second
+	eventDrainTimeout        = 5 * time.Second
+
+	// progressPersistInterval throttles how often streaming progress is written
+	// to the MetaStore and announced to watchers, and progressPersistTimeout
+	// bounds one such write. The timeout is of the same order as the interval:
+	// a progress figure that is already stale is not worth waiting for.
+	progressPersistInterval = 2 * time.Second
+	progressPersistTimeout  = 2 * time.Second
 )
 
 type QueryEvent struct {
@@ -105,6 +125,13 @@ type QueryManager struct {
 	watchers   map[string]map[chan QueryEvent]struct{}
 	watchersMu sync.Mutex
 
+	// events carries locally produced events to the publisher goroutine, which
+	// is stopped through publisherStop rather than through ctx: it has to
+	// outlive the query goroutines whose terminal events it publishes.
+	events        chan QueryEvent
+	publisherStop chan struct{}
+	publisherDone chan struct{}
+
 	wg      sync.WaitGroup // background workers
 	queryWG sync.WaitGroup // in-flight query goroutines
 	poolWG  sync.WaitGroup // deferred pool drains
@@ -125,6 +152,9 @@ func NewQueryManager(cfgManager *config.Manager, metaStore state.MetaStore) (*Qu
 		defaultStorage: cfg.Instance.DefaultStorage,
 		activeReg:      make(map[string]*activeQuery),
 		watchers:       make(map[string]map[chan QueryEvent]struct{}),
+		events:         make(chan QueryEvent, eventPublishBuffer),
+		publisherStop:  make(chan struct{}),
+		publisherDone:  make(chan struct{}),
 		ctx:            ctx,
 		cancel:         cancel,
 	}
@@ -144,6 +174,7 @@ func NewQueryManager(cfgManager *config.Manager, metaStore state.MetaStore) (*Qu
 	qm.wg.Go(qm.gcWorker)
 	qm.wg.Go(qm.controlWorker)
 	qm.wg.Go(qm.ownerReaper)
+	go qm.eventPublisher()
 
 	return qm, nil
 }
@@ -479,8 +510,13 @@ func (qm *QueryManager) SubmitQuery(ctx context.Context, dbID string, sql string
 		syncCh = ch
 	}
 
+	// I1 detaches the execution context from the request, which also detaches
+	// the span. The submitting span is carried over as a link so a trace can
+	// still be followed from transport to execution.
+	submitter := trace.SpanContextFromContext(ctx)
+
 	// Async execution. The goroutine is tracked so shutdown can wait for it.
-	qm.queryWG.Go(func() { qm.run(execCtx, record, pool, cancelExec) })
+	qm.queryWG.Go(func() { qm.run(execCtx, record, pool, cancelExec, submitter) })
 
 	if opts.Mode == "sync" {
 		// Wait for execution to finish
@@ -593,7 +629,7 @@ func (qm *QueryManager) Drain() {
 	qm.draining = true
 }
 
-func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, pool db.Pool, cancelExec context.CancelFunc) {
+func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, pool db.Pool, cancelExec context.CancelFunc, submitter trace.SpanContext) {
 	// LIFO: the registry entry is dropped only after the terminal state has been
 	// persisted, which keeps the lease alive across the retries and keeps the
 	// owner reaper away from a query that is merely slow to record its result.
@@ -601,11 +637,16 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	defer qm.releaseSlot()
 	defer qm.deregister(record.ID)
 
-	ctx, span := otel.Tracer("dbbridge").Start(ctx, "query.run",
+	spanOpts := []trace.SpanStartOption{
 		trace.WithAttributes(
 			attribute.String("query.id", record.ID),
 			attribute.String("query.database_id", record.DatabaseID),
-		))
+		),
+	}
+	if submitter.IsValid() {
+		spanOpts = append(spanOpts, trace.WithLinks(trace.Link{SpanContext: submitter}))
+	}
+	ctx, span := otel.Tracer("dbbridge").Start(ctx, "query.run", spanOpts...)
 	defer span.End()
 
 	startTime := time.Now()
@@ -664,7 +705,12 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	// be read back.
 	storeStart := time.Now()
 	hasher := sha256.New()
-	rowsCount, bytesWritten, encErr := storage.EncodeStream(ctx, rowsStream, record.Options.ResultFormat, io.MultiWriter(writer, hasher))
+	report, stopReporting := qm.progressReporter(ctx, record)
+	rowsCount, bytesWritten, encErr := storage.EncodeStream(ctx, rowsStream, record.Options.ResultFormat,
+		io.MultiWriter(writer, hasher), report)
+	// No progress write may still be in flight when the terminal write lands,
+	// or the two race for the record.
+	stopReporting()
 	// Close is where S3 and ClickHouse wait for the upload/commit and surface
 	// its error, so its result decides whether the query really succeeded (I4).
 	closeErr := writer.Close()
@@ -696,6 +742,81 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 
 	qm.finishRun(record, domain.StateSucceeded, nil, dbDuration, storeDuration)
 	telemetry.RecordResultBytes(ref.Backend, bytesWritten)
+}
+
+// progressReporter returns the callback that publishes streaming progress and
+// the function that shuts down the writer behind it. Stats used to be written
+// once, at completion, so a query that ran for an hour reported nothing until
+// it was already over. Writes are throttled: the point is a live figure, not a
+// record of every row.
+func (qm *QueryManager) progressReporter(ctx context.Context, record *domain.QueryRecord) (func(rows, bytes int64), func()) {
+	// A single-slot mailbox. The persist used to run inline, so every report
+	// parked the row loop for as long as the MetaStore took to answer - up to
+	// the full persist timeout on a degraded Redis, six times per minute, on a
+	// context that could not be canceled.
+	updates := make(chan domain.QueryRecord, 1)
+	done := make(chan struct{})
+	var lost atomic.Bool
+
+	go func() {
+		defer close(done)
+		for snapshot := range updates {
+			// Conditional write. An unconditional PutQuery here walked straight
+			// through the fence failOwnerLost puts up: a record another
+			// instance's reaper had already failed went back to RUNNING, with
+			// its FinishedAt and error cleared, and rejoined this instance's
+			// in-flight set with no lease behind it - so the reaper failed it
+			// again on the next tick, announcing a false terminal state to the
+			// cluster every couple of seconds.
+			writeCtx, cancel := context.WithTimeout(ctx, progressPersistTimeout)
+			written, err := qm.metaStore.UpdateQueryIfState(writeCtx, &snapshot, domain.StateRunning)
+			cancel()
+			switch {
+			case err != nil:
+				log.Printf("ERROR: failed to persist progress for query %s: %v", snapshot.ID, err)
+			case !written:
+				// The record is no longer ours: somebody finalized it, or GC
+				// removed it. Stop reporting rather than fight for it.
+				log.Printf("Query %s is no longer RUNNING in the MetaStore, dropping its progress reports", snapshot.ID)
+				lost.Store(true)
+				return
+			}
+		}
+	}()
+
+	// Zero, not time.Now(): the first batch of rows is reported straight away so
+	// a client sees the query moving instead of waiting out the first interval.
+	var last time.Time
+	report := func(rows, bytes int64) {
+		if lost.Load() || time.Since(last) < progressPersistInterval {
+			return
+		}
+		last = time.Now()
+
+		record.Stats.RowsRead = rows
+		record.Stats.BytesWritten = bytes
+		// Without this a client watching a running query sees the row count
+		// climb while the elapsed time stays at zero.
+		record.Stats.TotalDuration = time.Since(record.CreatedAt)
+
+		select {
+		case updates <- *record:
+		default:
+			// The writer is still busy. Dropping is right: the next report
+			// carries a newer figure, and the query must not wait for it.
+		}
+		qm.notifyWatchers(QueryEvent{
+			QueryID: record.ID,
+			State:   record.State,
+			Stats:   record.Stats,
+		})
+	}
+
+	stop := func() {
+		close(updates)
+		<-done
+	}
+	return report, stop
 }
 
 // terminalFor maps an execution failure to the terminal state the state machine
@@ -923,7 +1044,39 @@ func (qm *QueryManager) unwatch(queryID string, ch chan QueryEvent) {
 	qm.dropWatcherLocked(queryID, ch)
 }
 
+// notifyWatchers delivers an event locally and hands it to the publisher so
+// subscriptions held by other instances see it too (I2).
 func (qm *QueryManager) notifyWatchers(ev QueryEvent) {
+	qm.deliverEvent(ev)
+
+	if ev.State.IsTerminal() {
+		// A terminal event is the one that closes a remote subscription, and
+		// no further event for that query will ever follow it. Dropped along
+		// with the progress events it queues behind, it left every WebSocket
+		// connection and Connect stream held by another instance open for
+		// good. The query is finished by now, so waiting here costs nothing it
+		// was still doing.
+		select {
+		case qm.events <- ev:
+		case <-time.After(eventPublishTerminalWait):
+			log.Printf("ERROR: could not queue the terminal announcement for query %s, remote watchers will have to time out", ev.QueryID)
+		}
+		return
+	}
+
+	select {
+	case qm.events <- ev:
+	default:
+		// The publisher is behind. Dropping a progress announcement is
+		// preferable to stalling the query that produced it; readers can always
+		// poll the record, and the next report carries a newer figure.
+		log.Printf("WARNING: dropping the cross-instance announcement for query %s, publish queue is full", ev.QueryID)
+	}
+}
+
+// deliverEvent fans an event out to the subscriptions held by this process,
+// without republishing it.
+func (qm *QueryManager) deliverEvent(ev QueryEvent) {
 	qm.watchersMu.Lock()
 	defer qm.watchersMu.Unlock()
 
@@ -972,6 +1125,50 @@ func (qm *QueryManager) heartbeatWorker() {
 	}
 }
 
+// eventPublisher forwards locally produced events to the other instances.
+func (qm *QueryManager) eventPublisher() {
+	defer close(qm.publisherDone)
+	for {
+		select {
+		case ev := <-qm.events:
+			qm.publishEvent(ev)
+		case <-qm.publisherStop:
+			// Drain what the last query goroutines queued. Their terminal
+			// events are what closes the subscriptions the other instances
+			// hold; without this pass those connections hang until the client
+			// gives up.
+			deadline := time.Now().Add(eventDrainTimeout)
+			for time.Now().Before(deadline) {
+				select {
+				case ev := <-qm.events:
+					qm.publishEvent(ev)
+				default:
+					return
+				}
+			}
+			return
+		}
+	}
+}
+
+func (qm *QueryManager) publishEvent(ev QueryEvent) {
+	ctx, cancel := context.WithTimeout(qm.ctx, eventPublishTimeout)
+	defer cancel()
+	err := qm.metaStore.PublishControl(ctx, state.ControlMsg{
+		Type:     state.ControlQueryEvent,
+		QueryID:  ev.QueryID,
+		SenderID: qm.instanceID,
+		Event: &state.QueryEventPayload{
+			State: string(ev.State),
+			Stats: ev.Stats,
+			Error: ev.Error,
+		},
+	})
+	if err != nil && qm.ctx.Err() == nil {
+		log.Printf("ERROR: failed to publish the event for query %s: %v", ev.QueryID, err)
+	}
+}
+
 func (qm *QueryManager) controlWorker() {
 	ch, err := qm.metaStore.SubscribeControl(qm.ctx)
 	if err != nil {
@@ -987,7 +1184,14 @@ func (qm *QueryManager) controlWorker() {
 			if !ok {
 				return
 			}
-			if msg.Type == state.ControlStopQuery {
+			// Our own announcements come back on the same channel; delivering
+			// them again would double every event.
+			if msg.SenderID == qm.instanceID {
+				continue
+			}
+
+			switch msg.Type {
+			case state.ControlStopQuery:
 				qm.activeRegMu.RLock()
 				aq, ok := qm.activeReg[msg.QueryID]
 				qm.activeRegMu.RUnlock()
@@ -995,6 +1199,27 @@ func (qm *QueryManager) controlWorker() {
 					log.Printf("Received remote cancellation request for query %s", msg.QueryID)
 					aq.cancel()
 				}
+			case state.ControlQueryEvent:
+				if msg.Event == nil {
+					continue
+				}
+				// A query this instance is executing reports on itself. Handing
+				// it a remote verdict - a reaper that failed it after one missed
+				// heartbeat, say - closed the local subscriptions and made a
+				// sync submission return FAILED for a query that was still
+				// running and went on to succeed.
+				qm.activeRegMu.RLock()
+				_, mine := qm.activeReg[msg.QueryID]
+				qm.activeRegMu.RUnlock()
+				if mine {
+					continue
+				}
+				qm.deliverEvent(QueryEvent{
+					QueryID: msg.QueryID,
+					State:   domain.QueryState(msg.Event.State),
+					Stats:   msg.Event.Stats,
+					Error:   msg.Event.Error,
+				})
 			}
 		}
 	}
@@ -1231,13 +1456,25 @@ func (qm *QueryManager) DatabasesSeen(ctx context.Context) ([]string, error) {
 
 func (qm *QueryManager) Close() error {
 	qm.Drain()
-	qm.cancel()
-	qm.wg.Wait()
 
 	// Anything still executing has already outlived the shutdown grace period
 	// the caller allowed, so it is canceled rather than waited on for ever.
 	qm.cancelActive()
 	waitFor(&qm.queryWG, queryCloseTimeout)
+
+	// The publisher stops after the goroutines it publishes for, and by way of
+	// its own queue rather than the shared context. Stopping it first meant the
+	// terminal events of the last queries went into a queue nobody drained, so
+	// subscriptions held by other instances were left hanging on a shutdown.
+	close(qm.publisherStop)
+	select {
+	case <-qm.publisherDone:
+	case <-time.After(eventDrainTimeout + time.Second):
+		log.Print("WARNING: the event publisher did not drain in time, some announcements were not sent")
+	}
+
+	qm.cancel()
+	qm.wg.Wait()
 	qm.poolWG.Wait()
 
 	qm.dbPoolsMu.Lock()

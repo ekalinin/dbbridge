@@ -29,6 +29,7 @@ func TestMain(m *testing.M) {
 	db.Register("postgres", fastDriver{})     // fast 2-row driver
 	db.Register("mysql", streamDriver{})      // infinite-stream driver (cancel/timeout)
 	db.Register("clickhouse", &identDriver{}) // pools with identity, for reload tests
+	db.Register("oracle", bulkDriver{})       // many rows, for progress tests
 
 	dir, err := os.MkdirTemp("", "dbbridge-mgr-test-*")
 	if err != nil {
@@ -85,6 +86,10 @@ databases:
   - id: streamdb
     engine: mysql
     dsn: "mysql://fake"
+    max_conns: 2
+  - id: bulkdb
+    engine: oracle
+    dsn: "oracle://fake"
     max_conns: 2
 `, extraDefaults, resultsDir)
 
@@ -1088,5 +1093,278 @@ func TestSubmitQuery_RejectsFormatTheBackendCannotHold(t *testing.T) {
 		StorageBackend: textOnlyBackend,
 	}); err != nil {
 		t.Errorf("jsonl on the same backend was rejected: %v", err)
+	}
+}
+
+// TestWatch_AcrossInstances covers I2: watchers live in a per-process map, so
+// before events were published through the MetaStore a subscription opened on
+// any instance other than the owner never received anything.
+func TestWatch_AcrossInstances(t *testing.T) {
+	ms := state.NewMemoryMetaStore()
+	t.Cleanup(func() { ms.Close() })
+
+	owner := newManagerOn(t, ms, "instance-a")
+	reader := newManagerOn(t, ms, "instance-b")
+
+	rec, err := owner.SubmitQuery(context.Background(), "streamdb", "SELECT 1", domain.QueryOptions{Mode: "async"})
+	if err != nil {
+		t.Fatalf("SubmitQuery: %v", err)
+	}
+
+	// Subscribe through the instance that does not own the query.
+	ch, err := reader.Watch(t.Context(), rec.ID)
+	if err != nil {
+		t.Fatalf("Watch on the non-owner instance: %v", err)
+	}
+
+	if err := owner.StopQuery(context.Background(), rec.ID); err != nil {
+		t.Fatalf("StopQuery: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatal("the subscription closed without a terminal event")
+			}
+			if ev.State.IsTerminal() {
+				if ev.State != domain.StateCanceled {
+					t.Errorf("terminal state = %s, want CANCELED", ev.State)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("no terminal event reached the non-owner instance")
+		}
+	}
+}
+
+// TestRun_PublishesProgress covers stats that used to be written only once, at
+// completion, so a long query reported nothing until it was already over.
+func TestRun_PublishesProgress(t *testing.T) {
+	qm, _ := newManager(t)
+
+	rec, err := qm.SubmitQuery(context.Background(), "bulkdb", "SELECT *", domain.QueryOptions{Mode: "async"})
+	if err != nil {
+		t.Fatalf("SubmitQuery: %v", err)
+	}
+
+	ch, err := qm.Watch(t.Context(), rec.ID)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatal("no progress event before the query finished")
+			}
+			if ev.State == domain.StateRunning && ev.Stats.RowsRead > 0 {
+				if ev.Stats.BytesWritten == 0 {
+					t.Errorf("progress reported %d rows but 0 bytes", ev.Stats.RowsRead)
+				}
+				return
+			}
+			if ev.State.IsTerminal() {
+				t.Fatal("the query finished without ever reporting progress")
+			}
+		case <-deadline:
+			t.Fatal("no progress event")
+		}
+	}
+}
+
+// newManagerOn builds a manager with a given instance ID on a shared MetaStore,
+// which is what a multi-node deployment looks like.
+func newManagerOn(t *testing.T, ms state.MetaStore, instanceID string) *QueryManager {
+	t.Helper()
+	cfgContent := fmt.Sprintf(`
+instance:
+  id: %s
+  metastore: memory
+  default_storage: fs
+  heartbeat_ttl: 200ms
+server:
+  rest_addr: ":0"
+  grpc_addr: ":0"
+defaults:
+  result_ttl: 1h
+storage:
+  fs:
+    root: %s
+databases:
+  - id: streamdb
+    engine: mysql
+    dsn: "mysql://fake"
+    max_conns: 2
+`, instanceID, resultsDir)
+
+	path := filepath.Join(t.TempDir(), "cfg.yaml")
+	if err := os.WriteFile(path, []byte(cfgContent), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfgMgr, err := config.NewManager(path)
+	if err != nil {
+		t.Fatalf("config.NewManager: %v", err)
+	}
+	qm, err := NewQueryManager(cfgMgr, ms)
+	if err != nil {
+		t.Fatalf("NewQueryManager: %v", err)
+	}
+	t.Cleanup(func() { qm.Close() })
+	return qm
+}
+
+// bulkDriver emits many rows quickly, so streaming progress is observable
+// without waiting on wall-clock time.
+type bulkDriver struct{}
+
+func (bulkDriver) Open(_ context.Context, _ string, _ int) (db.Pool, error) { return bulkPool{}, nil }
+
+type bulkPool struct{}
+
+func (bulkPool) Exec(_ context.Context, _ string) (db.RowStream, error) {
+	return &bulkStream{total: 5000}, nil
+}
+func (bulkPool) Ping(_ context.Context) error { return nil }
+func (bulkPool) Stat() db.PoolStat            { return db.PoolStat{} }
+func (bulkPool) Close() error                 { return nil }
+
+type bulkStream struct {
+	total int
+	n     int
+}
+
+func (s *bulkStream) Columns() ([]string, error) { return []string{"id"}, nil }
+func (s *bulkStream) Next() bool {
+	if s.n >= s.total {
+		return false
+	}
+	s.n++
+	// Slow enough that the terminal state cannot beat the progress event.
+	time.Sleep(200 * time.Microsecond)
+	return true
+}
+func (s *bulkStream) Scan(dest ...any) error {
+	if p, ok := dest[0].(*any); ok {
+		*p = int64(s.n)
+	}
+	return nil
+}
+func (s *bulkStream) Err() error   { return nil }
+func (s *bulkStream) Close() error { return nil }
+
+// TestRun_ProgressDoesNotResurrectAFinalizedRecord: progress used to be written
+// with an unconditional PutQuery, so a record another instance's reaper had
+// already failed went back to RUNNING with its error and FinishedAt cleared,
+// and rejoined this instance's in-flight set with no lease behind it - so the
+// reaper failed it again on the next tick, announcing a false terminal state to
+// the cluster every couple of seconds.
+func TestRun_ProgressDoesNotResurrectAFinalizedRecord(t *testing.T) {
+	qm, ms := newManager(t)
+	ctx := context.Background()
+
+	rec, err := qm.SubmitQuery(ctx, "streamdb", "SELECT *", domain.QueryOptions{Mode: "async"})
+	if err != nil {
+		t.Fatalf("SubmitQuery: %v", err)
+	}
+	pollState(t, qm, rec.ID, domain.StateRunning, 3*time.Second)
+
+	// Wait for the reporter to write at least once, so the test is not just
+	// racing a reporter that never ran.
+	waitUntil(t, 6*time.Second, func() bool {
+		cur, err := ms.GetQuery(ctx, rec.ID)
+		return err == nil && cur.Stats.RowsRead > 0
+	}, "the first progress report")
+
+	// Another instance's reaper fences the record.
+	stored, err := ms.GetQuery(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("GetQuery: %v", err)
+	}
+	stored.State = domain.StateFailed
+	stored.Error = domain.NewQueryError(domain.ErrCodeOwnerLost, "owner lost", true)
+	stored.FinishedAt = time.Now()
+	written, err := ms.UpdateQueryIfState(ctx, stored, domain.StatePending, domain.StateRunning)
+	if err != nil || !written {
+		t.Fatalf("fencing write: written=%v err=%v", written, err)
+	}
+
+	// Several report intervals have to pass without the verdict being undone.
+	deadline := time.Now().Add(2*progressPersistInterval + time.Second)
+	for time.Now().Before(deadline) {
+		cur, err := ms.GetQuery(ctx, rec.ID)
+		if err != nil {
+			t.Fatalf("GetQuery: %v", err)
+		}
+		if cur.State != domain.StateFailed {
+			t.Fatalf("progress put the record back to %s after it had been failed", cur.State)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestControl_RemoteEventDoesNotCloseTheOwnersWatchers: a terminal event
+// published by another instance was delivered to local subscriptions without
+// checking whether this instance is the one executing the query. It closed the
+// watch stream and made a sync submission return FAILED for a query that was
+// still running and went on to succeed.
+func TestControl_RemoteEventDoesNotCloseTheOwnersWatchers(t *testing.T) {
+	ms := state.NewMemoryMetaStore()
+	t.Cleanup(func() {
+		if err := ms.Close(); err != nil {
+			t.Errorf("close metastore: %v", err)
+		}
+	})
+
+	owner := newManagerOn(t, ms, "owner")
+	ctx := context.Background()
+
+	rec, err := owner.SubmitQuery(ctx, "streamdb", "SELECT *", domain.QueryOptions{Mode: "async"})
+	if err != nil {
+		t.Fatalf("SubmitQuery: %v", err)
+	}
+	pollState(t, owner, rec.ID, domain.StateRunning, 3*time.Second)
+
+	ch, err := owner.Watch(t.Context(), rec.ID)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	// Drain the immediate snapshot the subscription starts with.
+	<-ch
+
+	if err := ms.PublishControl(ctx, state.ControlMsg{
+		Type:     state.ControlQueryEvent,
+		QueryID:  rec.ID,
+		SenderID: "some-other-instance",
+		Event: &state.QueryEventPayload{
+			State: string(domain.StateFailed),
+			Error: domain.NewQueryError(domain.ErrCodeOwnerLost, "owner lost", true),
+		},
+	}); err != nil {
+		t.Fatalf("PublishControl: %v", err)
+	}
+
+	select {
+	case ev, ok := <-ch:
+		if !ok {
+			t.Fatal("the subscription was closed by another instance's verdict on a query this one owns")
+		}
+		if ev.State.IsTerminal() {
+			t.Fatalf("a remote %s reached a watcher of a query this instance is still running", ev.State)
+		}
+	case <-time.After(time.Second):
+	}
+
+	// And the query really is still running.
+	cur, err := owner.GetQuery(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("GetQuery: %v", err)
+	}
+	if cur.State != domain.StateRunning {
+		t.Errorf("state = %s, want RUNNING", cur.State)
 	}
 }

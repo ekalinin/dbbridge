@@ -74,6 +74,9 @@ message QueryRecord {
   ResultRef result = 12;
   string idempotency_key = 13;
   int64 lease_deadline_ms = 14;
+  // Authenticated caller that submitted the query; empty when authentication
+  // is disabled or for records written before subject binding.
+  string subject = 15;
 }
 
 message DatabaseInfo {
@@ -146,6 +149,8 @@ message CanIBeStoppedRequest {}
 message CanIBeStoppedResponse {
   bool can_be_stopped = 1;
   int32 in_flight_count = 2;
+  // SERVING | DRAINING | STOPPABLE, see spec section 9.
+  string instance_state = 3;
 }
 
 message WatchQueryRequest {

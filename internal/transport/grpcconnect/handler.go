@@ -158,10 +158,11 @@ func (h *QueryHandler) ReloadConfig(ctx context.Context, req *connect.Request[v1
 }
 
 func (h *QueryHandler) CanIBeStopped(ctx context.Context, req *connect.Request[v1.CanIBeStoppedRequest]) (*connect.Response[v1.CanIBeStoppedResponse], error) {
-	canStop, inFlight := h.svc.CanIBeStopped(ctx)
+	canStop, inFlight, st := h.svc.CanIBeStopped(ctx)
 	return connect.NewResponse(&v1.CanIBeStoppedResponse{
 		CanBeStopped:  canStop,
 		InFlightCount: int32(inFlight),
+		InstanceState: string(st),
 	}), nil
 }
 
@@ -286,6 +287,7 @@ func mapToProtoRecord(r *domain.QueryRecord) *v1.QueryRecord {
 		Result:          protoResult,
 		IdempotencyKey:  r.IdempotencyKey,
 		LeaseDeadlineMs: unixMillis(r.LeaseDeadline),
+		Subject:         r.Subject,
 	}
 }
 
