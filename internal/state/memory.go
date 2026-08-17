@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -14,7 +15,8 @@ type MemoryMetaStore struct {
 	idempotency  map[string]string // key: dbID:key -> value: queryID
 	idempExpires map[string]time.Time
 	subscribers  []chan ControlMsg
-	instanceKeys map[string]time.Time
+	leases       map[string]time.Time // queryID -> lease expiry
+	locks        map[string]time.Time // lock name -> expiry
 }
 
 func NewMemoryMetaStore() *MemoryMetaStore {
@@ -22,7 +24,18 @@ func NewMemoryMetaStore() *MemoryMetaStore {
 		queries:      make(map[string]*domain.QueryRecord),
 		idempotency:  make(map[string]string),
 		idempExpires: make(map[string]time.Time),
-		instanceKeys: make(map[string]time.Time),
+		leases:       make(map[string]time.Time),
+		locks:        make(map[string]time.Time),
+	}
+}
+
+// store writes the record and mirrors the lease bookkeeping the Redis store
+// does: a terminal record has no lease. Callers must hold the write lock.
+func (m *MemoryMetaStore) store(record *domain.QueryRecord) {
+	recCopy := *record
+	m.queries[record.ID] = &recCopy
+	if record.State.IsTerminal() {
+		delete(m.leases, record.ID)
 	}
 }
 
@@ -30,9 +43,7 @@ func (m *MemoryMetaStore) PutQuery(ctx context.Context, record *domain.QueryReco
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Clone to avoid side effects
-	recCopy := *record
-	m.queries[record.ID] = &recCopy
+	m.store(record)
 	return nil
 }
 
@@ -47,6 +58,10 @@ func (m *MemoryMetaStore) GetQuery(ctx context.Context, id string) (*domain.Quer
 
 	// Clone to avoid data race
 	recCopy := *rec
+	// LeaseDeadline is derived from the lease, not stored in the record.
+	if exp, ok := m.leases[id]; ok {
+		recCopy.LeaseDeadline = exp
+	}
 	return &recCopy, nil
 }
 
@@ -58,9 +73,24 @@ func (m *MemoryMetaStore) UpdateQuery(ctx context.Context, record *domain.QueryR
 		return ErrNotFound
 	}
 
-	recCopy := *record
-	m.queries[record.ID] = &recCopy
+	m.store(record)
 	return nil
+}
+
+func (m *MemoryMetaStore) UpdateQueryIfState(ctx context.Context, record *domain.QueryRecord, expected ...domain.QueryState) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	current, ok := m.queries[record.ID]
+	if !ok {
+		return false, ErrNotFound
+	}
+	if !slices.Contains(expected, current.State) {
+		return false, nil
+	}
+
+	m.store(record)
+	return true, nil
 }
 
 func (m *MemoryMetaStore) AcquireIdempotency(ctx context.Context, dbID, key, queryID string, ttl time.Duration) (string, bool, error) {
@@ -77,20 +107,58 @@ func (m *MemoryMetaStore) AcquireIdempotency(ctx context.Context, dbID, key, que
 	return queryID, true, nil
 }
 
+func (m *MemoryMetaStore) ReleaseIdempotency(ctx context.Context, dbID, key, queryID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	fullKey := dbID + ":" + key
+	if m.idempotency[fullKey] != queryID {
+		return nil
+	}
+	delete(m.idempotency, fullKey)
+	delete(m.idempExpires, fullKey)
+	return nil
+}
+
+func (m *MemoryMetaStore) RefreshIdempotency(ctx context.Context, dbID, key, queryID string, ttl time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if ttl <= 0 {
+		return nil
+	}
+	fullKey := dbID + ":" + key
+	if m.idempotency[fullKey] != queryID {
+		return nil
+	}
+	m.idempExpires[fullKey] = time.Now().Add(ttl)
+	return nil
+}
+
 func (m *MemoryMetaStore) Heartbeat(ctx context.Context, instanceID string, ownedQueryIDs []string, ttl time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	now := time.Now()
-	m.instanceKeys[instanceID] = now.Add(ttl)
 
-	// Update lease deadlines for owned queries
+	// Leases live beside the records, never inside them, so refreshing one
+	// cannot clobber a concurrent terminal write.
 	for _, id := range ownedQueryIDs {
-		if q, ok := m.queries[id]; ok {
-			q.LeaseDeadline = now.Add(ttl)
-		}
+		m.leases[id] = now.Add(ttl)
 	}
 	return nil
+}
+
+func (m *MemoryMetaStore) TryLock(ctx context.Context, name string, ttl time.Duration) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	if exp, ok := m.locks[name]; ok && now.Before(exp) {
+		return false, nil
+	}
+	m.locks[name] = now.Add(ttl)
+	return true, nil
 }
 
 func (m *MemoryMetaStore) PublishControl(ctx context.Context, msg ControlMsg) error {
@@ -204,7 +272,7 @@ func (m *MemoryMetaStore) ListStaleQueries(ctx context.Context) ([]string, error
 		if q.State != domain.StatePending && q.State != domain.StateRunning {
 			continue
 		}
-		exp, ok := m.instanceKeys[q.OwnerInstanceID]
+		exp, ok := m.leases[q.ID]
 		if !ok || now.After(exp) {
 			stale = append(stale, q.ID)
 		}
@@ -225,6 +293,7 @@ func (m *MemoryMetaStore) DeleteQuery(ctx context.Context, id string) error {
 	}
 
 	delete(m.queries, id)
+	delete(m.leases, id)
 	return nil
 }
 
