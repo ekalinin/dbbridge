@@ -116,7 +116,7 @@ databases:
 	t.Cleanup(func() { qm.Close() })
 
 	svc := service.NewQueryService(qm, lm)
-	srv := rest.NewServer(svc)
+	srv := rest.NewServer(svc, rest.Options{})
 
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)

@@ -52,6 +52,15 @@ func NewClickHouseResultStore(dsn, table string) (*ClickHouseResultStore, error)
 	}, nil
 }
 
+// SupportsFormat reports the line-oriented formats only. The store splits the
+// incoming stream with bufio.Scanner and joins the rows back with "\n", which
+// is byte-exact for JSONL and CSV and destroys a binary one: parquet came back
+// one byte longer, its "PAR1" footer read as "AR1\n", and any \r\n inside the
+// file lost a byte.
+func (s *ClickHouseResultStore) SupportsFormat(format string) bool {
+	return format == "jsonl" || format == "csv"
+}
+
 type clickhousePipeWriter struct {
 	pw  *io.PipeWriter
 	wg  sync.WaitGroup

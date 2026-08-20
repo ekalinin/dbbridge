@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 
+	"github.com/ekalinin/dbbridge/internal/authn"
 	"github.com/ekalinin/dbbridge/internal/core/domain"
 	"github.com/ekalinin/dbbridge/internal/core/manager"
 	"github.com/ekalinin/dbbridge/internal/lifecycle"
@@ -18,6 +20,10 @@ import (
 type QueryService struct {
 	qm        *manager.QueryManager
 	lifecycle *lifecycle.Manager
+	// authRequired records that the deployment runs with credentials, so a
+	// request that arrives without an identity is a transport that forgot to
+	// authenticate rather than a deployment that chose not to.
+	authRequired bool
 }
 
 func NewQueryService(qm *manager.QueryManager, lm *lifecycle.Manager) *QueryService {
@@ -25,6 +31,12 @@ func NewQueryService(qm *manager.QueryManager, lm *lifecycle.Manager) *QueryServ
 		qm:        qm,
 		lifecycle: lm,
 	}
+}
+
+// SetAuthRequired tells the service that every caller is expected to carry an
+// identity. It is called once at startup, before any request is served.
+func (s *QueryService) SetAuthRequired(v bool) {
+	s.authRequired = v
 }
 
 func (s *QueryService) StartQuery(ctx context.Context, dbID string, sql string, opts domain.QueryOptions) (*domain.QueryRecord, error) {
@@ -41,16 +53,44 @@ func (s *QueryService) StartQuery(ctx context.Context, dbID string, sql string, 
 	return s.qm.SubmitQuery(ctx, dbID, sql, opts)
 }
 
+// authorized fetches a record and checks the caller may see it. Knowing a query
+// ID used to be enough to read anyone's SQL, status, stats and result; a
+// non-admin caller now only reaches its own queries. A record whose subject is
+// unknown to the caller is reported as not found rather than as forbidden, so
+// the API does not confirm that an ID exists.
+func (s *QueryService) authorized(ctx context.Context, queryID string) (*domain.QueryRecord, error) {
+	// AuthorizeSubject reads a missing identity as "authentication is disabled"
+	// and lets the call through. That is right for a deployment without
+	// credentials and wrong for one with them, where it would turn a route that
+	// slipped past the gate into anonymous access to every subject's records.
+	if s.authRequired {
+		if _, ok := authn.FromContext(ctx); !ok {
+			return nil, domain.NotFoundError{Resource: "query", ID: queryID}
+		}
+	}
+	rec, err := s.qm.GetQuery(ctx, queryID)
+	if err != nil {
+		return nil, err
+	}
+	if err := authn.AuthorizeSubject(ctx, rec.Subject); err != nil {
+		return nil, domain.NotFoundError{Resource: "query", ID: queryID}
+	}
+	return rec, nil
+}
+
 func (s *QueryService) GetQueryStatus(ctx context.Context, queryID string) (*domain.QueryRecord, error) {
-	return s.qm.GetQuery(ctx, queryID)
+	return s.authorized(ctx, queryID)
 }
 
 func (s *QueryService) StopQuery(ctx context.Context, queryID string) error {
+	if _, err := s.authorized(ctx, queryID); err != nil {
+		return err
+	}
 	return s.qm.StopQuery(ctx, queryID)
 }
 
 func (s *QueryService) GetQueryStats(ctx context.Context, queryID string) (domain.QueryStats, error) {
-	rec, err := s.qm.GetQuery(ctx, queryID)
+	rec, err := s.authorized(ctx, queryID)
 	if err != nil {
 		return domain.QueryStats{}, err
 	}
@@ -58,17 +98,20 @@ func (s *QueryService) GetQueryStats(ctx context.Context, queryID string) (domai
 }
 
 func (s *QueryService) DownloadResult(ctx context.Context, queryID string, offset, limit int64) (io.ReadCloser, domain.ResultRef, error) {
-	rec, err := s.qm.GetQuery(ctx, queryID)
+	rec, err := s.authorized(ctx, queryID)
 	if err != nil {
 		return nil, domain.ResultRef{}, err
 	}
 
 	if rec.State != domain.StateSucceeded {
-		return nil, domain.ResultRef{}, fmt.Errorf("query %s is in state %s, cannot download results", queryID, rec.State)
+		return nil, domain.ResultRef{}, domain.ValidationError{
+			Field:  "query_id",
+			Reason: "query is in state " + string(rec.State) + ", results are only available for SUCCEEDED",
+		}
 	}
 
 	if rec.Result == nil {
-		return nil, domain.ResultRef{}, fmt.Errorf("no results associated with query %s", queryID)
+		return nil, domain.ResultRef{}, domain.NotFoundError{Resource: "result for query", ID: queryID}
 	}
 
 	store, err := storage.GetStore(rec.Result.Backend)
@@ -94,8 +137,10 @@ func (s *QueryService) ListDatabases(ctx context.Context) ([]domain.DatabaseInfo
 	// Extract databases from active configuration
 	cfg := s.qm.GetConfig()
 	databases := make([]domain.DatabaseInfo, 0, len(cfg.Databases))
+	configured := make(map[string]struct{}, len(cfg.Databases))
 
 	for _, dbCfg := range cfg.Databases {
+		configured[dbCfg.ID] = struct{}{}
 		healthy := true
 		// Verify health status by checking if we have pool
 		pool, exists := s.qm.GetPool(dbCfg.ID)
@@ -111,6 +156,24 @@ func (s *QueryService) ListDatabases(ctx context.Context) ([]domain.DatabaseInfo
 		})
 	}
 
+	// Databases that still hold retained results but were dropped from the
+	// configuration are reported as unhealthy rather than hidden: their query
+	// records and results are still downloadable (I2).
+	seen, err := s.qm.DatabasesSeen(ctx)
+	if err != nil {
+		log.Printf("ERROR: failed to list databases seen: %v", err)
+		return databases, nil
+	}
+	for _, id := range seen {
+		if id == "" {
+			continue
+		}
+		if _, ok := configured[id]; ok {
+			continue
+		}
+		databases = append(databases, domain.DatabaseInfo{ID: id, Healthy: false})
+	}
+
 	return databases, nil
 }
 
@@ -118,9 +181,21 @@ func (s *QueryService) ReloadConfig(ctx context.Context) (domain.ReloadReport, e
 	return s.qm.Reload()
 }
 
-func (s *QueryService) CanIBeStopped(ctx context.Context) (bool, int) {
-	inFlight := s.qm.CountInFlight()
-	return inFlight == 0, inFlight
+// CanIBeStopped reports whether the orchestrator may terminate this instance.
+// The count comes from the MetaStore as well as the local registry, so a node
+// restarted under the same instance ID does not claim to be quiesced while
+// records it owns are still marked in-flight (I5, spec §10).
+func (s *QueryService) CanIBeStopped(ctx context.Context) (bool, int, lifecycle.State) {
+	inFlight := s.qm.CountInFlight(ctx)
+	// A draining instance with nothing left in flight advances to STOPPABLE,
+	// the third lifecycle state the spec defines (§10).
+	st := s.lifecycle.Advance(inFlight)
+	return inFlight == 0, inFlight, st
+}
+
+// InstanceState reports the lifecycle state of this instance.
+func (s *QueryService) InstanceState() lifecycle.State {
+	return s.lifecycle.GetState()
 }
 
 // IsDraining reports whether the instance is draining. The readiness probe uses
@@ -130,6 +205,9 @@ func (s *QueryService) IsDraining() bool {
 }
 
 func (s *QueryService) WatchQuery(ctx context.Context, queryID string) (<-chan manager.QueryEvent, error) {
+	if _, err := s.authorized(ctx, queryID); err != nil {
+		return nil, err
+	}
 	return s.qm.Watch(ctx, queryID)
 }
 

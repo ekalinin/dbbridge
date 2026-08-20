@@ -5,18 +5,43 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 
+	"github.com/ekalinin/dbbridge/internal/core/manager"
 	"github.com/ekalinin/dbbridge/internal/core/service"
 
 	"github.com/coder/websocket"
 )
 
-type Hub struct {
-	svc *service.QueryService
+// maxSubscriptionsPerConn bounds the watches a single connection can open.
+// Every watch used to spawn a goroutine and register a channel that lived until
+// the connection closed, with no check on the query ID, so one connection in a
+// loop could grow goroutines and memory without limit.
+const maxSubscriptionsPerConn = 32
+
+// BearerSubprotocol carries a credential through the WebSocket handshake. The
+// browser WebSocket API cannot set request headers, so a page authenticates by
+// offering the marker and the token as subprotocols:
+//
+//	new WebSocket(url, ["dbbridge.bearer", token])
+//
+// The server echoes only the marker back, never the token.
+const BearerSubprotocol = "dbbridge.bearer"
+
+// Options configures the hub.
+type Options struct {
+	// AllowedOrigins lists the browser origins allowed to open a connection.
+	// Empty means same-origin only, which is coder/websocket's default.
+	AllowedOrigins []string
 }
 
-func NewHub(svc *service.QueryService) *Hub {
-	return &Hub{svc: svc}
+type Hub struct {
+	svc  *service.QueryService
+	opts Options
+}
+
+func NewHub(svc *service.QueryService, opts Options) *Hub {
+	return &Hub{svc: svc, opts: opts}
 }
 
 type ClientMessage struct {
@@ -26,39 +51,67 @@ type ClientMessage struct {
 
 type ServerMessage struct {
 	QueryID string `json:"query_id"`
-	State   string `json:"state"`
+	State   string `json:"state,omitempty"`
 	Stats   any    `json:"stats,omitempty"`
 	Error   any    `json:"error,omitempty"`
 }
 
+// conn tracks the subscriptions of one WebSocket connection so a repeated watch
+// is a no-op, an unwatch actually cancels, and everything is released when the
+// connection goes away.
+type conn struct {
+	ws   *websocket.Conn
+	mu   sync.Mutex
+	subs map[string]context.CancelFunc
+	// writeMu serializes writes: coder/websocket allows one writer at a time
+	// and each subscription runs in its own goroutine.
+	writeMu sync.Mutex
+}
+
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Origin checking was disabled outright. Any page loaded in a browser
+	// inside the perimeter could then open a connection to dbbridge and read
+	// other people's query events (cross-site WebSocket hijacking).
 	opts := &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // Allow cross-origin for proxy
+		OriginPatterns: h.opts.AllowedOrigins,
+		// Accept the credential marker so a browser handshake that carries a
+		// token is not rejected for offering a subprotocol the server does not
+		// know. Only the marker is selected, so the token never comes back.
+		Subprotocols: []string{BearerSubprotocol},
 	}
 
-	conn, err := websocket.Accept(w, r, opts)
+	wsConn, err := websocket.Accept(w, r, opts)
 	if err != nil {
 		log.Printf("WS: Accept failed: %v", err)
 		return
 	}
 	defer func() {
-		if err := conn.CloseNow(); err != nil {
+		if err := wsConn.CloseNow(); err != nil {
 			log.Printf("WS: close failed: %v", err)
 		}
 	}()
 
+	// The request context ends when the client goes away, which is exactly the
+	// lifetime a subscription should have. It carries no deadline any more: the
+	// router applies its request timeout only to the short-lived routes.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	c := &conn{ws: wsConn, subs: make(map[string]context.CancelFunc)}
+	var wg sync.WaitGroup
+	// Declared in this order so the deferred calls run as closeAll -> wg.Wait:
+	// the pumps have to be canceled before anything waits on them.
+	defer wg.Wait()
+	defer c.closeAll()
+
 	// If query_id was provided in the query string, watch it immediately
-	queryID := r.URL.Query().Get("query_id")
-	if queryID != "" {
-		go h.watchQuery(ctx, conn, queryID)
+	if queryID := r.URL.Query().Get("query_id"); queryID != "" {
+		h.subscribe(ctx, &wg, c, queryID)
 	}
 
 	// Message loop for dynamic action-based subscriptions
 	for {
-		typ, data, err := conn.Read(ctx)
+		typ, data, err := wsConn.Read(ctx)
 		if err != nil {
 			// Normal closure or client disconnected
 			break
@@ -74,19 +127,48 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if msg.Action == "watch" && msg.QueryID != "" {
-			go h.watchQuery(ctx, conn, msg.QueryID)
+		switch msg.Action {
+		case "watch":
+			if msg.QueryID != "" {
+				h.subscribe(ctx, &wg, c, msg.QueryID)
+			}
+		case "unwatch":
+			c.unsubscribe(msg.QueryID)
 		}
 	}
 }
 
-func (h *Hub) watchQuery(ctx context.Context, conn *websocket.Conn, queryID string) {
-	ch, err := h.svc.WatchQuery(ctx, queryID)
+// subscribe opens a watch unless the connection already has one for that query
+// or has reached its subscription budget.
+func (h *Hub) subscribe(ctx context.Context, wg *sync.WaitGroup, c *conn, queryID string) {
+	c.mu.Lock()
+	if _, ok := c.subs[queryID]; ok {
+		c.mu.Unlock()
+		return
+	}
+	if len(c.subs) >= maxSubscriptionsPerConn {
+		c.mu.Unlock()
+		c.writeError(ctx, queryID, "subscription limit reached")
+		return
+	}
+	subCtx, subCancel := context.WithCancel(ctx)
+	c.subs[queryID] = subCancel
+	c.mu.Unlock()
+
+	ch, err := h.svc.WatchQuery(subCtx, queryID)
 	if err != nil {
-		log.Printf("WS: Watch failed for %s: %v", queryID, err)
+		c.unsubscribe(queryID)
+		c.writeError(ctx, queryID, "query not found")
 		return
 	}
 
+	wg.Go(func() {
+		defer c.unsubscribe(queryID)
+		c.pump(subCtx, ch)
+	})
+}
+
+func (c *conn) pump(ctx context.Context, ch <-chan manager.QueryEvent) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -105,17 +187,52 @@ func (h *Hub) watchQuery(ctx context.Context, conn *websocket.Conn, queryID stri
 				srvMsg.Error = ev.Error
 			}
 
-			data, err := json.Marshal(srvMsg)
-			if err != nil {
-				log.Printf("WS: Marshal failed: %v", err)
-				continue
-			}
-
-			err = conn.Write(ctx, websocket.MessageText, data)
-			if err != nil {
-				// Connection is likely closed
+			if !c.write(ctx, srvMsg) {
 				return
 			}
 		}
+	}
+}
+
+func (c *conn) write(ctx context.Context, msg ServerMessage) bool {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("WS: Marshal failed: %v", err)
+		return true
+	}
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if err := c.ws.Write(ctx, websocket.MessageText, data); err != nil {
+		// Connection is likely closed
+		return false
+	}
+	return true
+}
+
+func (c *conn) writeError(ctx context.Context, queryID, reason string) {
+	c.write(ctx, ServerMessage{QueryID: queryID, Error: reason})
+}
+
+func (c *conn) unsubscribe(queryID string) {
+	c.mu.Lock()
+	cancel, ok := c.subs[queryID]
+	delete(c.subs, queryID)
+	c.mu.Unlock()
+	if ok {
+		cancel()
+	}
+}
+
+func (c *conn) closeAll() {
+	c.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(c.subs))
+	for id, cancel := range c.subs {
+		cancels = append(cancels, cancel)
+		delete(c.subs, id)
+	}
+	c.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
 	}
 }

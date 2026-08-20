@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/ekalinin/dbbridge/internal/authn"
 	"github.com/ekalinin/dbbridge/internal/core/service"
 	v1 "github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1"
 	"github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1/dbbridgev1connect"
@@ -210,5 +212,203 @@ func TestConnect_WatchQueryStream(t *testing.T) {
 	}
 	if !sawTerminal {
 		t.Errorf("did not observe a terminal state via WatchQuery (stream err: %v)", stream.Err())
+	}
+}
+
+// TestConnect_ZeroTimestamps: time.Time{}.UnixNano()/1e6 is a large negative
+// number, so a PENDING record used to report started_at_ms and finished_at_ms
+// somewhere in the year 1754.
+func TestConnect_ZeroTimestamps(t *testing.T) {
+	svc, _ := testutil.NewService(t)
+	h := grpcconnect.NewQueryHandler(svc)
+
+	resp, err := h.StartQuery(context.Background(), connect.NewRequest(&v1.StartQueryRequest{
+		DatabaseId: "slowdb",
+		Sql:        "SELECT 1",
+		Options:    &v1.QueryOptions{Mode: "async"},
+	}))
+	if err != nil {
+		t.Fatalf("StartQuery: %v", err)
+	}
+
+	rec := resp.Msg.Record
+	if rec.StartedAtMs < 0 || rec.FinishedAtMs < 0 || rec.LeaseDeadlineMs < 0 {
+		t.Errorf("unset timestamps are negative: started=%d finished=%d lease=%d",
+			rec.StartedAtMs, rec.FinishedAtMs, rec.LeaseDeadlineMs)
+	}
+	if rec.CreatedAtMs <= 0 {
+		t.Errorf("created_at_ms = %d, want a real timestamp", rec.CreatedAtMs)
+	}
+}
+
+// TestConnect_ErrorCodes: every failure except draining used to be CodeInternal
+// with the wrapped driver error, DSN included, attached to it.
+func TestConnect_ErrorCodes(t *testing.T) {
+	svc, _ := testutil.NewService(t)
+	h := grpcconnect.NewQueryHandler(svc)
+
+	cases := []struct {
+		name string
+		req  *v1.StartQueryRequest
+		want connect.Code
+	}{
+		{"unknown database", &v1.StartQueryRequest{DatabaseId: "nope", Sql: "SELECT 1"}, connect.CodeNotFound},
+		{"bad format", &v1.StartQueryRequest{DatabaseId: "testdb", Sql: "SELECT 1",
+			Options: &v1.QueryOptions{ResultFormat: "avro"}}, connect.CodeInvalidArgument},
+		{"write statement", &v1.StartQueryRequest{DatabaseId: "testdb", Sql: "DROP TABLE t"}, connect.CodeInvalidArgument},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := h.StartQuery(context.Background(), connect.NewRequest(tc.req))
+			if err == nil {
+				t.Fatal("StartQuery succeeded, want an error")
+			}
+			if got := connect.CodeOf(err); got != tc.want {
+				t.Errorf("code = %v, want %v", got, tc.want)
+			}
+			lower := strings.ToLower(err.Error())
+			for _, leak := range []string{"dsn", "password", "postgres://", "fake@"} {
+				if strings.Contains(lower, leak) {
+					t.Errorf("error leaks %q: %v", leak, err)
+				}
+			}
+		})
+	}
+
+	if _, err := h.GetQueryStatus(context.Background(), connect.NewRequest(&v1.GetQueryStatusRequest{
+		QueryId: "no-such-query",
+	})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("GetQueryStatus code = %v, want NotFound", connect.CodeOf(err))
+	}
+}
+
+// TestConnect_RequiresCredentials: there was no interceptor at all, so the gRPC
+// surface ran arbitrary SQL for anyone who could reach the port. Streaming RPCs
+// are covered too, they go through a different interceptor hook.
+func TestConnect_RequiresCredentials(t *testing.T) {
+	svc, _ := testutil.NewService(t)
+	auth, err := authn.New([]authn.TokenSpec{
+		{Subject: "alice", Value: "alice-token", Scopes: []string{"read", "write"}},
+		{Subject: "watcher", Value: "read-token", Scopes: []string{"read"}},
+		{Subject: "root", Value: "admin-token", Scopes: []string{"admin"}},
+	})
+	if err != nil {
+		t.Fatalf("authn.New: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	path, handler := dbbridgev1connect.NewQueryServiceHandler(
+		grpcconnect.NewQueryHandler(svc),
+		connect.WithInterceptors(grpcconnect.NewAuthInterceptor(auth)),
+	)
+	mux.Handle(path, handler)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := func(token string) dbbridgev1connect.QueryServiceClient {
+		opts := []connect.ClientOption{}
+		if token != "" {
+			opts = append(opts, connect.WithInterceptors(
+				connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+					return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+						req.Header().Set("Authorization", "Bearer "+token)
+						return next(ctx, req)
+					}
+				}),
+			))
+		}
+		return dbbridgev1connect.NewQueryServiceClient(ts.Client(), ts.URL, opts...)
+	}
+
+	start := &v1.StartQueryRequest{DatabaseId: "testdb", Sql: "SELECT 1"}
+
+	if _, err := client("").StartQuery(context.Background(), connect.NewRequest(start)); connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Errorf("without a token: code = %v, want Unauthenticated", connect.CodeOf(err))
+	}
+	if _, err := client("read-token").StartQuery(context.Background(), connect.NewRequest(start)); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("with a read-only token: code = %v, want PermissionDenied", connect.CodeOf(err))
+	}
+	if _, err := client("alice-token").StartQuery(context.Background(), connect.NewRequest(start)); err != nil {
+		t.Errorf("with a write token: %v", err)
+	}
+	if _, err := client("alice-token").ReloadConfig(context.Background(), connect.NewRequest(&v1.ReloadConfigRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("reload with a write token: code = %v, want PermissionDenied", connect.CodeOf(err))
+	}
+
+	// A server stream must not be reachable without a credential either.
+	stream, err := client("").WatchQuery(context.Background(), connect.NewRequest(&v1.WatchQueryRequest{QueryId: "x"}))
+	if err == nil {
+		stream.Receive()
+		err = stream.Err()
+		if cerr := stream.Close(); cerr != nil {
+			t.Logf("close stream: %v", cerr)
+		}
+	}
+	if connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Errorf("streaming without a token: code = %v, want Unauthenticated", connect.CodeOf(err))
+	}
+}
+
+// TestConnect_QueriesAreBoundToTheirSubject: the scopes were tested on this
+// surface but the subject binding was not, and that is the second of the two
+// properties the credential work is for.
+func TestConnect_QueriesAreBoundToTheirSubject(t *testing.T) {
+	svc, _ := testutil.NewService(t)
+	auth, err := authn.New([]authn.TokenSpec{
+		{Subject: "alice", Value: "alice-token", Scopes: []string{"read", "write"}},
+		{Subject: "bob", Value: "bob-token", Scopes: []string{"read", "write"}},
+		{Subject: "root", Value: "admin-token", Scopes: []string{"admin"}},
+	})
+	if err != nil {
+		t.Fatalf("authn.New: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	path, handler := dbbridgev1connect.NewQueryServiceHandler(
+		grpcconnect.NewQueryHandler(svc),
+		connect.WithInterceptors(grpcconnect.NewAuthInterceptor(auth)),
+	)
+	mux.Handle(path, handler)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := func(token string) dbbridgev1connect.QueryServiceClient {
+		return dbbridgev1connect.NewQueryServiceClient(ts.Client(), ts.URL, connect.WithInterceptors(
+			connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+				return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+					req.Header().Set("Authorization", "Bearer "+token)
+					return next(ctx, req)
+				}
+			}),
+		))
+	}
+
+	started, err := client("alice-token").StartQuery(context.Background(), connect.NewRequest(&v1.StartQueryRequest{
+		DatabaseId: "testdb",
+		Sql:        "SELECT 1",
+		Options:    &v1.QueryOptions{Mode: "sync"},
+	}))
+	if err != nil {
+		t.Fatalf("StartQuery: %v", err)
+	}
+	id := started.Msg.GetRecord().GetId()
+	if id == "" {
+		t.Fatal("no query id in the response")
+	}
+
+	status := &v1.GetQueryStatusRequest{QueryId: id}
+	if _, err := client("alice-token").GetQueryStatus(context.Background(), connect.NewRequest(status)); err != nil {
+		t.Errorf("the owner could not read its own query: %v", err)
+	}
+	// A different subject must not learn that the ID exists.
+	if _, err := client("bob-token").GetQueryStatus(context.Background(), connect.NewRequest(status)); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("foreign GetQueryStatus: code = %v, want NotFound", connect.CodeOf(err))
+	}
+	if _, err := client("admin-token").GetQueryStatus(context.Background(), connect.NewRequest(status)); err != nil {
+		t.Errorf("admin was denied: %v", err)
+	}
+	if _, err := client("bob-token").StopQuery(context.Background(), connect.NewRequest(&v1.StopQueryRequest{QueryId: id})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("foreign StopQuery: code = %v, want NotFound", connect.CodeOf(err))
 	}
 }

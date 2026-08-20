@@ -17,6 +17,7 @@ make run                      # build + run with configs/dbbridge-blue.yaml
 # Tests
 make test-unit                # go test ./internal/... -short (unit tests only)
 make test-integration         # go test ./internal/... -timeout 120s (requires live DBs/Redis)
+make test-containers          # real Redis/PostgreSQL/MySQL/MinIO via testcontainers (needs Docker)
 make test-e2e                 # go test ./test/e2e/... -timeout 300s
 go test ./internal/config/... # run a single package's tests
 
@@ -25,7 +26,8 @@ make lint                     # golangci-lint run ./...
 make vet                      # go vet ./...
 make fmt                      # gofmt -l -w .
 make check                    # vet + lint
-make ci                       # everything CI runs (fmt-check, vet, tests, race, lint, buf lint)
+make ci                       # the fast CI job (fmt-check, vet, tests, race, lint, buf lint, govulncheck)
+make test-containers          # the other CI job: real backends via testcontainers, needs Docker
 
 # Protobuf
 make proto                    # buf generate (regenerates internal/gen/)
@@ -71,12 +73,14 @@ dbbridge is a **stateless SQL proxy** that accepts queries over REST (including 
 
 ### Key design points
 
-- **Driver registration**: DB drivers (`postgres`, `mysql`, `clickhouse`, `oracle`) and storage backends (`fs`, `s3`) are registered at startup via blank imports. To add a new driver, implement `db.Driver` and blank-import its package in `cmd/dbbridge/main.go`.
+- **Driver registration**: DB drivers (`postgres`, `mysql`, `clickhouse`, `oracle`) are registered at startup via blank imports in `cmd/dbbridge/main.go`. Storage backends (`fs`, `s3`, `clickhouse`) are built explicitly there from the sections the configuration asks for, so a backend that cannot be built is a startup failure rather than a 400 on the first query that needs it.
 - **MetaStore duality**: `memory` metastore is for single-node dev; `redis` enables multi-node deployment with cross-instance query cancellation via Pub/Sub and lease heartbeats.
 - **Idempotency**: Pass `Idempotency-Key` HTTP header (or `options.idempotency_key` in gRPC) to deduplicate submissions within a result TTL window.
 - **Query modes**: `mode: "sync"` blocks until terminal state; `mode: "async"` (default) returns `202 Accepted` immediately.
-- **Result formats**: `jsonl` (default), `csv`, `parquet` — controlled per-query via `result_format`.
-- **Graceful shutdown**: SIGTERM/SIGINT triggers draining state (new queries rejected), then waits up to 30 s for in-flight queries to finish before closing HTTP servers.
+- **Result formats**: `jsonl` (default), `csv`, `parquet` — controlled per-query via `result_format`, validated against a whitelist before any storage writer is opened.
+- **Authentication**: static bearer tokens from `auth.tokens` with `read` / `write` / `admin` scopes; `write` implies `read`, `admin` implies both. `internal/authn` holds only the identity, the scopes and the token comparison - the chi middleware lives in `internal/transport/rest` and the Connect interceptor in `internal/transport/grpcconnect`, so the core does not link a transport. A query is only readable by the subject that submitted it.
+- **Read-only guard**: `internal/sqlguard` rejects DML and DDL before execution unless `defaults.allow_writes` is set.
+- **Graceful shutdown**: SIGTERM/SIGINT triggers draining state (new queries rejected, admission closed in the manager under the same lock that registers a query), then waits up to 30 s for in-flight queries to finish before closing HTTP servers.
 - **Config hot-reload**: `config.Manager` uses `atomic.Pointer` for lock-free reads; `QueryManager.Reload()` diffs DB pools and closes removed ones without restarting.
 
 ### Proto / generated code
@@ -88,7 +92,7 @@ Proto definitions live under `api/proto/`. Generated Go code is at `internal/gen
 YAML config file path is passed via `-config` flag. Key fields:
 
 - `instance.metastore`: `"memory"` or `"redis"` — determines cluster mode
-- `instance.default_storage`: `"fs"` or `"s3"` — default result backend
+- `instance.default_storage`: `"fs"`, `"s3"` or `"clickhouse"` — default result backend, captured at startup and not reloadable
 - `databases[].engine`: `postgres` | `mysql` | `clickhouse` | `oracle`
 - `storage.fs.root`: local directory for result files
 - `storage.s3.*`: S3-compatible (MinIO supported via `endpoint` override)

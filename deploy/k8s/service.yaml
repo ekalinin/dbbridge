@@ -19,3 +19,5 @@ spec:
       port: 9090
       targetPort: grpc
       protocol: TCP
+    # The admin listener (8081, /metrics and /v1/admin/*) is deliberately not
+    # published here: Prometheus scrapes the pod directly via the annotations.

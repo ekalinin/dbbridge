@@ -11,7 +11,8 @@ GO_BUILD      := CGO_ENABLED=0 go build $(LDFLAGS)
 
 .PHONY: all build clean run \
         proto proto-lint \
-        test test-unit test-integration test-e2e test-all test-race \
+        test test-unit test-integration test-containers test-e2e test-all test-race \
+        vulncheck \
         lint vet fmt fmt-check check ci \
         docker-build docker-push \
         up down logs restart \
@@ -51,6 +52,22 @@ test-unit:
 test-integration:
 	go test ./internal/... -count=1 -timeout 120s
 
+# Real backends in containers (Redis, PostgreSQL, MySQL, MinIO).
+# Requires a Docker daemon; skipped by every other target via the build tag.
+#
+# testcontainers does not read the docker CLI context, so under colima it has to
+# be told twice: DOCKER_HOST is the host-side socket it connects to, and
+# TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE is the same socket as seen *inside* the
+# VM, which is what its reaper container bind-mounts. Empty on Docker Desktop
+# and in CI, where the default socket is already correct for both.
+ifeq ($(shell docker context show 2>/dev/null),colima)
+CONTAINER_ENV := DOCKER_HOST=$(shell docker context inspect colima --format '{{.Endpoints.docker.Host}}') \
+                 TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
+endif
+
+test-containers:
+	$(CONTAINER_ENV) go test -race -tags=integration ./test/integration/... -count=1 -timeout 900s
+
 test-e2e:
 	go test ./test/e2e/... -count=1 -timeout 300s
 
@@ -63,11 +80,23 @@ test-race:
 
 # ── Quality ──────────────────────────────────────────────────────────────────
 
+# Pinned rather than @latest: an unpinned tool version makes CI fail on a
+# release of the tool with no change in this repository, and runs unreviewed
+# code from the network on every build.
+GOVULNCHECK_VERSION ?= v1.1.4
+
+vulncheck:
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
 lint:
 	golangci-lint run ./...
 
+# The integration package is cut out by its build tag, and a package whose files
+# are all cut out is skipped by ./... without a word, so those files would
+# otherwise not be vetted or compiled outside the container job.
 vet:
 	go vet ./...
+	go vet -tags=integration ./test/integration/...
 
 fmt:
 	gofmt -l -w .
@@ -78,8 +107,9 @@ fmt-check:
 
 check: vet lint
 
-# The CI workflow runs these same targets, one per step.
-ci: fmt-check vet test-all test-race lint proto-lint
+# The CI workflow runs these same targets, one per step, plus test-containers in
+# a job of its own - that one needs a Docker daemon, so it is not part of `ci`.
+ci: fmt-check vet test-all test-race lint proto-lint vulncheck
 
 # ── Docker ───────────────────────────────────────────────────────────────────
 
@@ -106,10 +136,12 @@ restart:
 # ── Admin endpoints ──────────────────────────────────────────────────────────
 
 reload-config:
-	curl -s -X POST http://localhost:8081/v1/admin/reload | jq .
+	curl -s -X POST http://localhost:8181/v1/admin/reload \
+		-H "Authorization: Bearer $${DBBRIDGE_TOKEN_ADMIN:-dev-admin-token}" | jq .
 
 can-stop:
-	curl -s http://localhost:8081/v1/admin/can-stop | jq .
+	curl -s http://localhost:8181/v1/admin/can-stop \
+		-H "Authorization: Bearer $${DBBRIDGE_TOKEN_ADMIN:-dev-admin-token}" | jq .
 
 # ── Kubernetes ───────────────────────────────────────────────────────────────
 

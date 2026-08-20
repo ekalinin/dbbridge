@@ -18,7 +18,7 @@ import (
 
 func TestWS_WatchQueryViaQueryParam(t *testing.T) {
 	svc, _ := testutil.NewService(t)
-	hub := ws.NewHub(svc)
+	hub := ws.NewHub(svc, ws.Options{})
 	srv := httptest.NewServer(http.HandlerFunc(hub.ServeHTTP))
 	t.Cleanup(srv.Close)
 
@@ -70,7 +70,7 @@ func TestWS_WatchQueryViaQueryParam(t *testing.T) {
 
 func TestWS_WatchViaActionMessage(t *testing.T) {
 	svc, _ := testutil.NewService(t)
-	hub := ws.NewHub(svc)
+	hub := ws.NewHub(svc, ws.Options{})
 	srv := httptest.NewServer(http.HandlerFunc(hub.ServeHTTP))
 	t.Cleanup(srv.Close)
 
@@ -117,5 +117,137 @@ func TestWS_WatchViaActionMessage(t *testing.T) {
 	}
 	if !sawTerminal {
 		t.Error("did not receive a terminal state via action-based subscription")
+	}
+}
+
+// TestWS_RejectsForeignOrigin: origin checking was disabled outright, so any
+// page in a browser inside the perimeter could read other people's query
+// events (cross-site WebSocket hijacking).
+func TestWS_RejectsForeignOrigin(t *testing.T) {
+	svc, _ := testutil.NewService(t)
+	hub := ws.NewHub(svc, ws.Options{})
+	srv := httptest.NewServer(http.HandlerFunc(hub.ServeHTTP))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wsURL := strings.Replace(srv.URL, "http://", "ws://", 1)
+	_, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Origin": []string{"http://evil.example"}},
+	})
+	if err == nil {
+		t.Fatal("dial from a foreign origin succeeded")
+	}
+}
+
+func TestWS_AllowsConfiguredOrigin(t *testing.T) {
+	svc, _ := testutil.NewService(t)
+	hub := ws.NewHub(svc, ws.Options{AllowedOrigins: []string{"friend.example"}})
+	srv := httptest.NewServer(http.HandlerFunc(hub.ServeHTTP))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wsURL := strings.Replace(srv.URL, "http://", "ws://", 1)
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Origin": []string{"http://friend.example"}},
+	})
+	if err != nil {
+		t.Fatalf("dial from an allowed origin: %v", err)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+}
+
+// TestWS_BoundsSubscriptions: every watch message used to start a goroutine and
+// register a channel that lived until the connection closed, with no cap and no
+// check on the query ID.
+func TestWS_BoundsSubscriptions(t *testing.T) {
+	svc, _ := testutil.NewService(t)
+	hub := ws.NewHub(svc, ws.Options{})
+	srv := httptest.NewServer(http.HandlerFunc(hub.ServeHTTP))
+	t.Cleanup(srv.Close)
+
+	// Long-running queries, so every subscription stays open.
+	const queries = 40
+	ids := make([]string, 0, queries)
+	for range queries {
+		rec, err := svc.StartQuery(context.Background(), "slowdb", "SELECT 1", domain.QueryOptions{Mode: "async"})
+		if err != nil {
+			t.Fatalf("StartQuery: %v", err)
+		}
+		ids = append(ids, rec.ID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, strings.Replace(srv.URL, "http://", "ws://", 1), nil)
+	if err != nil {
+		t.Fatalf("ws dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	for _, id := range ids {
+		msg, _ := json.Marshal(map[string]string{"action": "watch", "query_id": id})
+		if err := conn.Write(ctx, websocket.MessageText, msg); err != nil {
+			t.Fatalf("ws write: %v", err)
+		}
+	}
+
+	sawLimit := false
+	for range queries {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			break
+		}
+		var msg struct {
+			Error any `json:"error"`
+		}
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+		if s, ok := msg.Error.(string); ok && strings.Contains(s, "subscription limit") {
+			sawLimit = true
+			break
+		}
+	}
+	if !sawLimit {
+		t.Error("the connection accepted more subscriptions than its budget")
+	}
+}
+
+// TestWS_UnknownQueryIsReported: a watch on an unknown ID used to hang for ever.
+func TestWS_UnknownQueryIsReported(t *testing.T) {
+	svc, _ := testutil.NewService(t)
+	hub := ws.NewHub(svc, ws.Options{})
+	srv := httptest.NewServer(http.HandlerFunc(hub.ServeHTTP))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, strings.Replace(srv.URL, "http://", "ws://", 1), nil)
+	if err != nil {
+		t.Fatalf("ws dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	msg, _ := json.Marshal(map[string]string{"action": "watch", "query_id": "no-such-query"})
+	if err := conn.Write(ctx, websocket.MessageText, msg); err != nil {
+		t.Fatalf("ws write: %v", err)
+	}
+
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("ws read: %v", err)
+	}
+	var got struct {
+		Error any `json:"error"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Error == nil {
+		t.Errorf("watching an unknown query reported no error: %s", data)
 	}
 }

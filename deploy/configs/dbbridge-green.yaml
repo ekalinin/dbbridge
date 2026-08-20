@@ -2,7 +2,8 @@ instance:
   id: dbbridge-green
   metastore: redis
   redis_addr: "redis:6379"
-  redis_password: ""
+  # Injected from the environment; never store credentials in the config file.
+  redis_password: "${REDIS_PASSWORD}"
   redis_db: 0
   default_storage: s3
   heartbeat_ttl: 5s
@@ -10,20 +11,47 @@ instance:
 server:
   rest_addr: ":8080"
   grpc_addr: ":9090"
+  # /metrics and /v1/admin/* live here, off the public REST port.
+  admin_addr: ":8081"
+  max_request_bytes: 1048576
+  request_timeout: 60s
+  read_header_timeout: 10s
+  idle_timeout: 120s
+  # Browser origins allowed to open a WebSocket. Empty means same-origin only.
+  ws_allowed_origins: []
+  rate_limit:
+    requests_per_second: 50
+    burst: 100
+  tls:
+    # No certificate in the dev stack, so gRPC runs as cleartext HTTP/2. Saying
+    # so explicitly keeps the startup warning off.
+    allow_h2c: true
+
+auth:
+  tokens:
+    - subject: reporting
+      value_env: DBBRIDGE_TOKEN_REPORTING
+      scopes: [read, write]
+    - subject: orchestrator
+      value_env: DBBRIDGE_TOKEN_ADMIN
+      scopes: [admin]
 
 defaults:
   result_ttl: 24h
   query_timeout: 0s
+  max_concurrent_queries: 32
+  # DML and DDL are rejected unless this is turned on explicitly.
+  allow_writes: false
 
 storage:
   fs:
-    root: "./results"
+    root: "/app/results"
   s3:
     bucket: "dbbridge"
     region: "us-east-1"
     endpoint: "http://minio:9000"
-    access_key_id: "minioadmin"
-    secret_access_key: "minioadmin"
+    access_key_id: "${S3_ACCESS_KEY_ID}"
+    secret_access_key: "${S3_SECRET_ACCESS_KEY}"
 
 databases:
   - id: dvdrental

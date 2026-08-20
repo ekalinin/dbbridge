@@ -16,30 +16,65 @@ spec:
         app: dbbridge
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "8080"
+        # Metrics live on the admin listener, not on the public REST port.
+        prometheus.io/port: "8081"
         prometheus.io/path: "/metrics"
     spec:
       terminationGracePeriodSeconds: 60
+      # The application never talks to the cluster API.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: dbbridge
           image: dbbridge:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           ports:
             - name: rest
               containerPort: 8080
             - name: grpc
               containerPort: 9090
+            - name: admin
+              containerPort: 8081
           env:
+            # Expanded into instance.id, so each replica owns its own leases.
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+          envFrom:
+            # Created from deploy/k8s/secret.example.yaml; see deploy/README.md.
+            - secretRef:
+                name: dbbridge-secrets
           volumeMounts:
             - name: config
               mountPath: /etc/dbbridge
               readOnly: true
+            # The process writes result files and needs somewhere to put them
+            # under a read-only root filesystem. Swap for a PVC if results have
+            # to outlive the pod; with default_storage: s3 they do not.
+            - name: results
+              mountPath: /data/results
+            - name: tmp
+              mountPath: /tmp
           args:
             - -config=/etc/dbbridge/dbbridge.yaml
+          # The probes speak plain HTTP. server.tls turns TLS on for all three
+          # listeners at once, so enabling it in the ConfigMap without adding
+          # `scheme: HTTPS` here makes kubelet talk cleartext to a TLS port, the
+          # liveness probe fail and the pod restart in a loop while the process
+          # itself is fine. Same for prometheus.io/scheme on the annotations
+          # above, and a volume holding the certificate.
           livenessProbe:
             httpGet:
               path: /healthz
@@ -65,3 +100,7 @@ spec:
         - name: config
           configMap:
             name: dbbridge-config
+        - name: results
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

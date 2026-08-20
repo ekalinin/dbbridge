@@ -4,12 +4,16 @@ metadata:
   name: dbbridge-config
   namespace: default
 data:
+  # ${VAR} references are expanded from the environment when the config is
+  # loaded. Without that expansion `dbbridge-$(POD_NAME)` stayed a literal and
+  # every replica reported the same instance ID, which makes leases, remote
+  # cancellation and owner-loss detection meaningless.
   dbbridge.yaml: |
     instance:
-      id: dbbridge-$(POD_NAME)
+      id: dbbridge-${POD_NAME}
       metastore: redis
       redis_addr: "redis:6379"
-      redis_password: ""
+      redis_password: "${REDIS_PASSWORD}"
       redis_db: 0
       default_storage: s3
       heartbeat_ttl: 5s
@@ -17,10 +21,42 @@ data:
     server:
       rest_addr: ":8080"
       grpc_addr: ":9090"
+      # Metrics and the admin routes live on their own port so they are not
+      # reachable through the public Service.
+      admin_addr: ":8081"
+      max_request_bytes: 1048576
+      request_timeout: 60s
+      read_header_timeout: 10s
+      idle_timeout: 120s
+      # Number of proxy hops in front of the service; decides which
+      # X-Forwarded-For entry is treated as the client address. It stays 0
+      # while the only thing in front is the ClusterIP Service, which is L4 and
+      # adds no such header: a non-zero count there would let any caller pick
+      # its own client address, and with it its own rate-limit bucket. Set it to
+      # 1 once an ingress that appends X-Forwarded-For is in the path.
+      trusted_proxy_count: 0
+      # Browser origins allowed to open a WebSocket. Empty means same-origin.
+      ws_allowed_origins: []
+      rate_limit:
+        # Per-caller request rate, keyed by authenticated subject.
+        requests_per_second: 50
+        burst: 100
+
+    auth:
+      tokens:
+        - subject: reporting
+          value_env: DBBRIDGE_TOKEN_REPORTING
+          scopes: [read, write]
+        - subject: orchestrator
+          value_env: DBBRIDGE_TOKEN_ADMIN
+          scopes: [admin]
 
     defaults:
       result_ttl: 24h
       query_timeout: 0s
+      max_concurrent_queries: 32
+      # DML and DDL are rejected unless this is turned on explicitly.
+      allow_writes: false
 
     storage:
       fs:
@@ -29,7 +65,7 @@ data:
         bucket: "dbbridge"
         region: "us-east-1"
         endpoint: ""
-        access_key_id: ""
-        secret_access_key: ""
+        access_key_id: "${S3_ACCESS_KEY_ID}"
+        secret_access_key: "${S3_SECRET_ACCESS_KEY}"
 
     databases: []

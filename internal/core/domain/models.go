@@ -2,6 +2,8 @@ package domain
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -56,11 +58,70 @@ type QueryOptions struct {
 	StorageBackend string        `json:"storage_backend"` // override default storage engine
 }
 
+// ValidResultFormats lists the encodings EncodeStream can actually produce.
+// The list is a whitelist rather than a blacklist because ResultFormat reaches
+// the filesystem as part of a file name: anything outside this set must be
+// rejected before a storage writer is ever opened.
+var ValidResultFormats = []string{"jsonl", "csv", "parquet"}
+
+// ValidModes lists the accepted execution modes.
+var ValidModes = []string{"async", "sync"}
+
+// Validate checks the client-supplied options. It runs after defaults have been
+// applied and before any side effect (idempotency key, storage writer, SQL).
+func (o QueryOptions) Validate() error {
+	if !slices.Contains(ValidModes, o.Mode) {
+		return ValidationError{
+			Field:  "mode",
+			Reason: "must be one of " + strings.Join(ValidModes, ", "),
+		}
+	}
+	if !slices.Contains(ValidResultFormats, o.ResultFormat) {
+		return ValidationError{
+			Field:  "result_format",
+			Reason: "must be one of " + strings.Join(ValidResultFormats, ", "),
+		}
+	}
+	if o.Timeout < 0 {
+		return ValidationError{Field: "timeout_ms", Reason: "must not be negative"}
+	}
+	if o.ResultTTL < 0 {
+		return ValidationError{Field: "result_ttl_seconds", Reason: "must not be negative"}
+	}
+	return nil
+}
+
+// QueryErrorCode is the bounded set of failure reasons a query can end with.
+type QueryErrorCode string
+
+const (
+	ErrCodeDBExecFailed          QueryErrorCode = "DB_EXEC_FAILED"
+	ErrCodeQueryTimeout          QueryErrorCode = "QUERY_TIMEOUT"
+	ErrCodeStorageInitFailed     QueryErrorCode = "STORAGE_INIT_FAILED"
+	ErrCodeStorageWriterFailed   QueryErrorCode = "STORAGE_WRITER_FAILED"
+	ErrCodeStorageFinalizeFailed QueryErrorCode = "STORAGE_FINALIZE_FAILED"
+	ErrCodeStreamEncodeFailed    QueryErrorCode = "STREAM_ENCODE_FAILED"
+	ErrCodeOwnerLost             QueryErrorCode = "OWNER_LOST"
+)
+
+// maxQueryErrorMessage bounds the driver text copied into a QueryError. The
+// message is readable by anyone holding the query ID, so it is truncated rather
+// than passed through in full.
+const maxQueryErrorMessage = 512
+
 // QueryError encapsulates database or proxy-level query execution failures.
 type QueryError struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	Retryable bool   `json:"retryable"`
+	Code      QueryErrorCode `json:"code"`
+	Message   string         `json:"message"`
+	Retryable bool           `json:"retryable"`
+}
+
+// NewQueryError builds a QueryError with a bounded message.
+func NewQueryError(code QueryErrorCode, message string, retryable bool) *QueryError {
+	if len(message) > maxQueryErrorMessage {
+		message = message[:maxQueryErrorMessage] + "…"
+	}
+	return &QueryError{Code: code, Message: message, Retryable: retryable}
 }
 
 func (e *QueryError) Error() string {
@@ -103,6 +164,11 @@ type QueryRecord struct {
 	Result          *ResultRef   `json:"result,omitzero"`
 	IdempotencyKey  string       `json:"idempotency_key,omitempty"`
 	LeaseDeadline   time.Time    `json:"lease_deadline,omitzero"`
+	// Subject is the authenticated caller that submitted the query. Knowing a
+	// query ID used to be enough to read anyone's SQL, status and result; the
+	// subject is what the read paths check against. Records written before
+	// subject binding have it empty, which only the admin scope can reach.
+	Subject string `json:"subject,omitempty"`
 }
 
 // DatabaseInfo represents static configuration and status metadata of a target database.

@@ -17,13 +17,26 @@ type ControlType string
 
 const (
 	ControlStopQuery ControlType = "STOP_QUERY"
+	// ControlQueryEvent carries a state or progress change to the instances
+	// that hold subscriptions for a query they do not own. Watchers live in a
+	// per-process map, so without this a subscription opened through any other
+	// instance never received an event (I2).
+	ControlQueryEvent ControlType = "QUERY_EVENT"
 )
+
+// QueryEventPayload is the body of a ControlQueryEvent.
+type QueryEventPayload struct {
+	State string             `json:"state"`
+	Stats domain.QueryStats  `json:"stats"`
+	Error *domain.QueryError `json:"error,omitempty"`
+}
 
 // ControlMsg represents a payload exchanged between nodes via Pub/Sub.
 type ControlMsg struct {
-	Type     ControlType `json:"type"`
-	QueryID  string      `json:"query_id"`
-	SenderID string      `json:"sender_id"`
+	Type     ControlType        `json:"type"`
+	QueryID  string             `json:"query_id"`
+	SenderID string             `json:"sender_id"`
+	Event    *QueryEventPayload `json:"event,omitempty"`
 }
 
 // MetaStore defines the persistence layer for tracking query execution metadata,
