@@ -31,13 +31,9 @@ import (
 )
 
 const (
-	// gcInterval is how often each instance offers to run garbage collection.
+	// gcInterval is the default period between garbage-collection passes,
+	// used when instance.gc_interval is not set.
 	gcInterval = time.Minute
-	// gcBudget bounds a single GC pass, and gcLockTTL keeps it exclusive across
-	// the cluster. gcLockTTL sits between gcBudget and gcInterval so the lock
-	// always expires before the next tick and exactly one instance runs a pass.
-	gcBudget   = 45 * time.Second
-	gcLockTTL  = 50 * time.Second
 	gcLockName = "gc"
 
 	// reapBudget bounds a single owner-reaper pass.
@@ -182,6 +178,21 @@ func NewQueryManager(cfgManager *config.Manager, metaStore state.MetaStore) (*Qu
 func (qm *QueryManager) heartbeatTTL() time.Duration {
 	return qm.cfgManager.Get().Instance.HeartbeatTTL
 }
+
+// gcPeriod is how often this instance offers to run garbage collection.
+func (qm *QueryManager) gcPeriod() time.Duration {
+	if d := qm.cfgManager.Get().Instance.GCInterval; d > 0 {
+		return d
+	}
+	return gcInterval
+}
+
+// gcBudget bounds a single GC pass and gcLockTTL keeps it exclusive across the
+// cluster. Both are derived from the period so the lock always expires before
+// the next tick and exactly one instance runs a pass; at the one-minute default
+// they are the 45s and 50s the constants used to spell out.
+func (qm *QueryManager) gcBudget() time.Duration  { return qm.gcPeriod() * 3 / 4 }
+func (qm *QueryManager) gcLockTTL() time.Duration { return qm.gcPeriod() * 5 / 6 }
 
 // samePoolConfig reports whether a pool opened for old can keep serving new.
 func samePoolConfig(a, b config.DatabaseConfig) bool {
@@ -1226,7 +1237,8 @@ func (qm *QueryManager) controlWorker() {
 }
 
 func (qm *QueryManager) gcWorker() {
-	ticker := time.NewTicker(gcInterval)
+	// The period is read once: the ticker outlives a reload, like the reaper's.
+	ticker := time.NewTicker(qm.gcPeriod())
 	defer ticker.Stop()
 
 	for {
@@ -1242,13 +1254,13 @@ func (qm *QueryManager) gcWorker() {
 // collectGarbage transitions expired queries to EXPIRED and removes their
 // storage results and metadata. Extracted from gcWorker for testability.
 func (qm *QueryManager) collectGarbage() {
-	ctx, cancel := context.WithTimeout(context.Background(), gcBudget)
+	ctx, cancel := context.WithTimeout(context.Background(), qm.gcBudget())
 	defer cancel()
 
 	// ListExpiredQueries returns the same set on every instance. Without a lock
 	// they race to delete the same result: one wins, the rest log a deletion
 	// failure, and those false alarms hide the real ones.
-	locked, err := qm.metaStore.TryLock(ctx, gcLockName, gcLockTTL)
+	locked, err := qm.metaStore.TryLock(ctx, gcLockName, qm.gcLockTTL())
 	if err != nil {
 		log.Printf("ERROR: GC worker failed to acquire the cluster lock: %v", err)
 		return

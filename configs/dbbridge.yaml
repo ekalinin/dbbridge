@@ -8,6 +8,8 @@ instance:
   redis_db: 0
   default_storage: fs
   heartbeat_ttl: 5s
+  # How often garbage collection sweeps expired results. Default 1m.
+  gc_interval: 1m
 
 server:
   rest_addr: ":8080"
