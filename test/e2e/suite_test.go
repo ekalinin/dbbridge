@@ -229,11 +229,20 @@ func newConnectServer(t *testing.T, svc *service.QueryService, auth *authn.Authe
 }
 
 // connectClient dials the Connect server over h2c.
+//
+// HTTP1 is deliberately left disabled on this transport. Per
+// http.Transport.Protocols: "If Protocols includes UnencryptedHTTP2 and does
+// not include HTTP1, the transport will use unencrypted HTTP/2 for requests
+// for http:// URLs" - with HTTP1 also enabled, the transport has no
+// ALPN-equivalent to negotiate with over plaintext and silently falls back to
+// HTTP/1.1, so a client built that way never actually exercises h2c. Do not
+// add SetHTTP1(true) back here; the server side (newConnectServer) keeps both
+// protocols, matching cmd/dbbridge/main.go, so it still serves plain HTTP/1.1
+// callers too - only this test client needs to prove the h2c path works.
 func (h *testHarness) connectClient(t *testing.T) dbbridgev1connect.QueryServiceClient {
 	t.Helper()
 	tr := &http.Transport{}
 	tr.Protocols = new(http.Protocols)
-	tr.Protocols.SetHTTP1(true)
 	tr.Protocols.SetUnencryptedHTTP2(true)
 	return dbbridgev1connect.NewQueryServiceClient(&http.Client{Transport: tr}, h.grpcURL)
 }

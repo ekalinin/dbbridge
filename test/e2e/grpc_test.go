@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"testing"
 	"time"
 
@@ -27,6 +28,31 @@ func connectStartSync(t *testing.T, c dbbridgev1connect.QueryServiceClient, dbID
 		t.Fatalf("StartQuery: %v", err)
 	}
 	return resp.Msg.Record
+}
+
+// TestConnect_UsesUnencryptedHTTP2 pins the claim in this file's name: a
+// client that only offers UnencryptedHTTP2 (no HTTP1 fallback) must actually
+// complete a request against h.grpcURL over real cleartext HTTP/2. Without
+// this, a client transport that enables both protocols would silently fall
+// back to HTTP/1.1 - see the comment on (*testHarness).connectClient - and
+// every other test in this file would keep passing while never touching h2c.
+func TestConnect_UsesUnencryptedHTTP2(t *testing.T) {
+	h := newHarness(t)
+
+	tr := &http.Transport{}
+	tr.Protocols = new(http.Protocols)
+	tr.Protocols.SetUnencryptedHTTP2(true)
+	client := &http.Client{Transport: tr}
+
+	resp, err := client.Get(h.grpcURL)
+	if err != nil {
+		t.Fatalf("GET %s: %v", h.grpcURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.Proto != "HTTP/2.0" {
+		t.Fatalf("negotiated protocol = %q, want HTTP/2.0", resp.Proto)
+	}
 }
 
 // TestConnect_LifecycleOverH2C runs the whole submit -> status -> stats ->
