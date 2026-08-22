@@ -1,7 +1,6 @@
 package e2e_test
 
 import (
-	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -111,13 +110,18 @@ func TestSQLGuard_RejectsWrites(t *testing.T) {
 			defer resp.Body.Close()
 			assertStatus(t, resp, http.StatusBadRequest)
 
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				t.Fatalf("read body: %v", err)
+			// Decode the envelope and check only the `error` field, not the raw
+			// body: the body also carries a request_id (chi's RequestID
+			// middleware prefixes it with os.Hostname()), and a host whose name
+			// happens to contain "users" would otherwise fail this test for a
+			// reason that has nothing to do with the SQL guard.
+			var envelope struct {
+				Error string `json:"error"`
 			}
+			decodeJSON(t, resp.Body, &envelope)
 			// The rejection explains the rule; it never echoes the statement.
-			if strings.Contains(string(body), "users") {
-				t.Errorf("rejection echoes the statement back: %s", body)
+			if strings.Contains(envelope.Error, "users") {
+				t.Errorf("rejection echoes the statement back: %s", envelope.Error)
 			}
 		})
 	}
