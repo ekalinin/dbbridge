@@ -42,34 +42,20 @@ func startSlowAsync(t *testing.T, h *testHarness) string {
 // and then requests a stop over REST. A fixed sleep before the stop would
 // either race the WebSocket subscription (on a slow machine) or pad every run
 // with an unnecessary wait (on a fast one); polling the actual precondition
-// avoids both. It runs detached in its own goroutine and never touches *testing.T,
-// so it cannot panic after the test that started it has returned.
+// avoids both. It runs detached in its own goroutine and never touches
+// *testing.T, so it cannot panic after the test that started it has returned:
+// it builds on pollForState (cancel_test.go), the same loop pollUntilState
+// wraps with a t.Fatalf on timeout. If the state is never reached, this
+// goroutine just gives up silently, and the caller's own deadline (e.g.
+// readUntilTerminal's context) is what surfaces the failure.
 func stopWhenRunning(h *testHarness, id string) {
 	go func() {
-		deadline := time.After(5 * time.Second)
-		ticker := time.NewTicker(10 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-deadline:
-				return
-			case <-ticker.C:
-				resp, err := http.Get(h.baseURL + "/v1/queries/" + id)
-				if err != nil {
-					continue
-				}
-				var rec queryRecord
-				decErr := json.NewDecoder(resp.Body).Decode(&rec)
-				resp.Body.Close()
-				if decErr != nil || rec.State != "RUNNING" {
-					continue
-				}
-				stop, err := http.Post(h.baseURL+"/v1/queries/"+id+":stop", "application/json", nil)
-				if err == nil {
-					stop.Body.Close()
-				}
-				return
-			}
+		if !pollForState(h.baseURL, id, "RUNNING", 5*time.Second) {
+			return
+		}
+		stop, err := http.Post(h.baseURL+"/v1/queries/"+id+":stop", "application/json", nil)
+		if err == nil {
+			stop.Body.Close()
 		}
 	}()
 }
