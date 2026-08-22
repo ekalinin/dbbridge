@@ -1,7 +1,8 @@
 // Package testutil provides shared, Docker-free fakes and a wiring harness for
 // unit tests of the service and transport layers. It registers a fast fake DB
 // driver (under engine "postgres"), a blocking "slow" driver (under engine
-// "mysql"), and a local-FS ResultStore — no external services required.
+// "mysql"), a driver that always fails to open (under engine "clickhouse"),
+// and a local-FS ResultStore — no external services required.
 package testutil
 
 import (
@@ -32,6 +33,7 @@ func ensureRegistered(t *testing.T) {
 	registerOnce.Do(func() {
 		db.Register("postgres", FakeDriver{})
 		db.Register("mysql", SlowDriver{})
+		db.Register("clickhouse", FailToOpenDriver{})
 
 		dir, err := os.MkdirTemp("", "dbbridge-testutil-*")
 		if err != nil {
@@ -79,6 +81,16 @@ databases:
 // can flip draining state. All resources are cleaned up via t.Cleanup.
 func NewService(t *testing.T) (*service.QueryService, *lifecycle.Manager) {
 	t.Helper()
+	svc, lm, _ := NewServiceWithConfigFile(t)
+	return svc, lm
+}
+
+// NewServiceWithConfigFile is like NewService but also returns the path to the
+// config file backing it, for tests that need to rewrite it on disk and then
+// reload - e.g. to point a database at FailToOpenDriver and exercise a failed
+// config reload.
+func NewServiceWithConfigFile(t *testing.T) (*service.QueryService, *lifecycle.Manager, string) {
+	t.Helper()
 	ensureRegistered(t)
 
 	cfgFile, err := os.CreateTemp(t.TempDir(), "dbbridge-*.yaml")
@@ -115,7 +127,7 @@ func NewService(t *testing.T) (*service.QueryService, *lifecycle.Manager) {
 	})
 
 	lm := lifecycle.NewManager()
-	return service.NewQueryService(qm, lm), lm
+	return service.NewQueryService(qm, lm), lm, cfgFile.Name()
 }
 
 // ── Fakes ────────────────────────────────────────────────────────────────────
@@ -166,6 +178,16 @@ func (s *fakeRowStream) Scan(dest ...any) error {
 
 func (s *fakeRowStream) Err() error   { return nil }
 func (s *fakeRowStream) Close() error { return nil }
+
+// FailToOpenDriver's pools never open. The error echoes the DSN back, the way
+// a real pgx/mysql/clickhouse driver's connection-refused error does, so tests
+// can exercise a database that fails during config reload (rather than during
+// query execution, which FakeDriver and SlowDriver already cover).
+type FailToOpenDriver struct{}
+
+func (FailToOpenDriver) Open(_ context.Context, dsn string, _ int) (db.Pool, error) {
+	return nil, fmt.Errorf("connection refused: %s", dsn)
+}
 
 // SlowDriver blocks Exec until its context is canceled — for cancel/timeout tests.
 type SlowDriver struct{}
