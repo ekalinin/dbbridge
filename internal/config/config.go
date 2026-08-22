@@ -296,6 +296,11 @@ func validate(cfg *Config) error {
 	if cfg.Instance.GCInterval == 0 {
 		cfg.Instance.GCInterval = time.Minute
 	}
+	// gcLockTTL derives the cluster lock TTL as gcPeriod*5/6; above ~58 years
+	// that multiplication overflows time.Duration and silently disables GC.
+	if cfg.Instance.GCInterval > 58*365*24*time.Hour {
+		return fmt.Errorf("instance.gc_interval must not exceed 58 years")
+	}
 	if cfg.Defaults.ResultTTL == 0 {
 		cfg.Defaults.ResultTTL = 24 * time.Hour
 	}

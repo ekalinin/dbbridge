@@ -987,6 +987,82 @@ databases:
 	}
 }
 
+// TestGCPeriod_FixedAcrossReload is the regression test for a GC period desync:
+// gcWorker's ticker used to be built once from gcPeriod(), but gcBudget and
+// gcLockTTL called gcPeriod() again on every pass, which re-read the live
+// config. A reload that changed instance.gc_interval left the ticker at the
+// old period while the budget and lock TTL followed the new one - shortening
+// it let the cluster lock expire mid-pass, lengthening it stalled GC because
+// the lock could not be re-acquired before the next (now too-early) tick.
+// gcPeriod() must return the same value before and after a reload.
+func TestGCPeriod_FixedAcrossReload(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "cfg.yaml")
+	write := func(gcInterval string) {
+		body := fmt.Sprintf(`
+instance:
+  id: test-instance
+  metastore: memory
+  default_storage: fs
+  heartbeat_ttl: 200ms
+  gc_interval: %s
+server:
+  rest_addr: ":0"
+  grpc_addr: ":0"
+defaults:
+  result_ttl: 1h
+storage:
+  fs:
+    root: %s
+databases:
+  - id: testdb
+    engine: postgres
+    dsn: "postgres://fake"
+    max_conns: 2
+`, gcInterval, resultsDir)
+		if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+
+	write("1m")
+	cfgMgr, err := config.NewManager(cfgPath)
+	if err != nil {
+		t.Fatalf("config.NewManager: %v", err)
+	}
+	ms := state.NewMemoryMetaStore()
+	t.Cleanup(func() { ms.Close() })
+
+	qm, err := NewQueryManager(cfgMgr, ms)
+	if err != nil {
+		t.Fatalf("NewQueryManager: %v", err)
+	}
+	t.Cleanup(func() { qm.Close() })
+
+	beforePeriod := qm.gcPeriod()
+	beforeBudget := qm.gcBudget()
+	beforeLockTTL := qm.gcLockTTL()
+
+	write("5s")
+	if _, err := qm.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	// Confirm the reload really did change the live config, so a pass below is
+	// not a false positive from a no-op reload.
+	if got := qm.cfgManager.Get().Instance.GCInterval; got != 5*time.Second {
+		t.Fatalf("live config gc_interval = %v, want 5s", got)
+	}
+
+	if got := qm.gcPeriod(); got != beforePeriod {
+		t.Errorf("gcPeriod() after reload = %v, want unchanged %v", got, beforePeriod)
+	}
+	if got := qm.gcBudget(); got != beforeBudget {
+		t.Errorf("gcBudget() after reload = %v, want unchanged %v", got, beforeBudget)
+	}
+	if got := qm.gcLockTTL(); got != beforeLockTTL {
+		t.Errorf("gcLockTTL() after reload = %v, want unchanged %v", got, beforeLockTTL)
+	}
+}
+
 // identDriver hands out pools that are distinguishable from one another, which
 // is what a reload test needs: the other fakes are empty structs and compare
 // equal even when the pool really was recreated.

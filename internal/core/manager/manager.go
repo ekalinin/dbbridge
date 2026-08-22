@@ -109,6 +109,14 @@ type QueryManager struct {
 	dbPoolsMu sync.RWMutex
 	reloadMu  sync.Mutex // serializes reloads; pools are opened under it, not under dbPoolsMu
 
+	// gcPeriodDur is the GC period captured at construction. gcPeriod() returns
+	// it rather than re-reading the live config, so the ticker gcWorker builds
+	// from gcPeriod() and the budget/lock TTL that gcBudget/gcLockTTL derive
+	// from it can never disagree after a reload changes instance.gc_interval -
+	// config.Manager.Reload swaps the whole *Config, and both the admin reload
+	// endpoint and SIGHUP can trigger it independently of gcWorker's ticker.
+	gcPeriodDur time.Duration
+
 	// activeRegMu guards both the registry and the draining flag, so admission
 	// and the drain decision are one atomic step (I5).
 	activeReg   map[string]*activeQuery
@@ -146,6 +154,7 @@ func NewQueryManager(cfgManager *config.Manager, metaStore state.MetaStore) (*Qu
 		dbPools:        make(map[string]*managedPool),
 		instanceID:     cfg.Instance.ID,
 		defaultStorage: cfg.Instance.DefaultStorage,
+		gcPeriodDur:    cfg.Instance.GCInterval,
 		activeReg:      make(map[string]*activeQuery),
 		watchers:       make(map[string]map[chan QueryEvent]struct{}),
 		events:         make(chan QueryEvent, eventPublishBuffer),
@@ -179,16 +188,21 @@ func (qm *QueryManager) heartbeatTTL() time.Duration {
 	return qm.cfgManager.Get().Instance.HeartbeatTTL
 }
 
-// gcPeriod is how often this instance offers to run garbage collection.
+// gcPeriod is how often this instance offers to run garbage collection. It
+// returns the period captured at construction (qm.gcPeriodDur), not the live
+// config: gcWorker builds its ticker from this value, and gcBudget/gcLockTTL
+// derive their durations from it too, so a reload that changes
+// instance.gc_interval can never desync the ticker from the budget and lock
+// TTL that are supposed to fit inside it.
 func (qm *QueryManager) gcPeriod() time.Duration {
-	if d := qm.cfgManager.Get().Instance.GCInterval; d > 0 {
-		return d
+	if qm.gcPeriodDur > 0 {
+		return qm.gcPeriodDur
 	}
 	return gcInterval
 }
 
 // gcBudget bounds a single GC pass and gcLockTTL keeps it exclusive across the
-// cluster. Both are derived from the period so the lock always expires before
+// cluster. Both are derived from gcPeriod() so the lock always expires before
 // the next tick and exactly one instance runs a pass; at the one-minute default
 // they are the 45s and 50s the constants used to spell out.
 func (qm *QueryManager) gcBudget() time.Duration  { return qm.gcPeriod() * 3 / 4 }
@@ -1266,7 +1280,9 @@ func (qm *QueryManager) controlWorker() {
 }
 
 func (qm *QueryManager) gcWorker() {
-	// The period is read once: the ticker outlives a reload, like the reaper's.
+	// gcPeriod() returns the value captured at construction, so the ticker
+	// outlives a reload, like the reaper's - and stays in lockstep with the
+	// budget and lock TTL collectGarbage derives from the same call.
 	ticker := time.NewTicker(qm.gcPeriod())
 	defer ticker.Stop()
 
