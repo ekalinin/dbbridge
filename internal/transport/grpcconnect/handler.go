@@ -145,9 +145,12 @@ func (h *QueryHandler) ListDatabases(ctx context.Context, req *connect.Request[v
 func (h *QueryHandler) ReloadConfig(ctx context.Context, req *connect.Request[v1.ReloadConfigRequest]) (*connect.Response[v1.ReloadConfigResponse], error) {
 	report, err := h.svc.ReloadConfig(ctx)
 	if err != nil {
+		// A failed database pool carries the DSN (host, port, user); it belongs
+		// in the log, never in the response - same rule as connectError below.
+		log.Printf("ERROR: config reload failed: %v", err)
 		return connect.NewResponse(&v1.ReloadConfigResponse{
 			Success: false,
-			Message: err.Error(),
+			Message: "config reload failed",
 		}), nil
 	}
 

@@ -20,7 +20,11 @@ type InstanceConfig struct {
 	RedisDB        int           `yaml:"redis_db"`
 	DefaultStorage string        `yaml:"default_storage"` // "fs", "s3", "clickhouse"
 	HeartbeatTTL   time.Duration `yaml:"heartbeat_ttl"`   // default 5s
-	OTLPEndpoint   string        `yaml:"otlp_endpoint"`   // OTLP gRPC endpoint; empty disables OTLP export
+	// GCInterval is how often this instance offers to run garbage collection;
+	// default 1m. The pass budget and the cluster lock TTL are derived from it,
+	// so shortening it keeps exactly one instance per pass.
+	GCInterval   time.Duration `yaml:"gc_interval"`
+	OTLPEndpoint string        `yaml:"otlp_endpoint"` // OTLP gRPC endpoint; empty disables OTLP export
 }
 
 // TLSConfig enables TLS on the REST and gRPC listeners.
@@ -288,6 +292,14 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Instance.HeartbeatTTL == 0 {
 		cfg.Instance.HeartbeatTTL = 5 * time.Second
+	}
+	if cfg.Instance.GCInterval == 0 {
+		cfg.Instance.GCInterval = time.Minute
+	}
+	// gcLockTTL derives the cluster lock TTL as gcPeriod*5/6; above ~58 years
+	// that multiplication overflows time.Duration and silently disables GC.
+	if cfg.Instance.GCInterval > 58*365*24*time.Hour {
+		return fmt.Errorf("instance.gc_interval must not exceed 58 years")
 	}
 	if cfg.Defaults.ResultTTL == 0 {
 		cfg.Defaults.ResultTTL = 24 * time.Hour

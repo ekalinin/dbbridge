@@ -86,9 +86,11 @@ type queryRecord struct {
 		BytesWritten int64 `json:"bytes_written"`
 	} `json:"stats"`
 	Result *struct {
-		Backend  string `json:"backend"`
-		RowCount int64  `json:"row_count"`
-		Format   string `json:"format"`
+		Backend   string `json:"backend"`
+		Locator   string `json:"locator"`
+		RowCount  int64  `json:"row_count"`
+		SizeBytes int64  `json:"size_bytes"`
+		Format    string `json:"format"`
 	} `json:"result"`
 	Error *struct {
 		Code    string `json:"code"`
@@ -152,11 +154,21 @@ func TestListDatabases(t *testing.T) {
 	}
 	decodeJSON(t, resp.Body, &dbs)
 
-	if len(dbs) != 1 {
-		t.Fatalf("expected 1 database, got %d", len(dbs))
+	// The harness config carries three databases (testdb, slowdb, faildb) so
+	// later tests can reach the cancel and failure paths; testdb is the one
+	// this test cares about.
+	if len(dbs) != 3 {
+		t.Fatalf("expected 3 databases, got %d", len(dbs))
 	}
-	if dbs[0].ID != "testdb" {
-		t.Errorf("expected database ID 'testdb', got %q", dbs[0].ID)
+	found := false
+	for _, d := range dbs {
+		if d.ID == "testdb" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected database ID 'testdb' among %v", dbs)
 	}
 }
 
