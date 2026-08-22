@@ -375,11 +375,11 @@ func (failDriver) Open(_ context.Context, _ string, _ int) (db.Pool, error) {
 
 type failPool struct{}
 
-// execFailure carries a DSN-shaped secret so a test can assert the API does not
-// echo the driver error back to the caller.
-var execFailure = errors.New("relation \"users\" does not exist (host=db.internal user=admin password=hunter2)")
+// errExecFailure carries a DSN-shaped secret so a test can assert the API does
+// not echo the driver error back to the caller.
+var errExecFailure = errors.New("relation \"users\" does not exist (host=db.internal user=admin password=hunter2)")
 
-func (failPool) Exec(_ context.Context, _ string) (db.RowStream, error) { return nil, execFailure }
+func (failPool) Exec(_ context.Context, _ string) (db.RowStream, error) { return nil, errExecFailure }
 func (failPool) Ping(_ context.Context) error                           { return nil }
 func (failPool) Stat() db.PoolStat                                      { return db.PoolStat{} }
 func (failPool) Close() error                                           { return nil }
