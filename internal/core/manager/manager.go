@@ -683,7 +683,7 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	dbDuration := time.Since(dbStart)
 
 	if err != nil {
-		nextState, qErr := terminalFor(ctx, err, domain.ErrCodeDBExecFailed)
+		nextState, qErr := terminalFor(ctx, record.ID, err, domain.ErrCodeDBExecFailed)
 		qm.finishRun(record, nextState, qErr, dbDuration, 0)
 		return
 	}
@@ -696,8 +696,11 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	// Initialize Result Store Writer
 	store, err := storage.GetStore(record.Options.StorageBackend)
 	if err != nil {
+		// The storage backend error can name an endpoint, a bucket or other
+		// internals; log it in full and hand the caller only a fixed message.
+		log.Printf("ERROR: query %s failed with %s: %v", record.ID, domain.ErrCodeStorageInitFailed, err)
 		qm.finishRun(record, domain.StateFailed,
-			domain.NewQueryError(domain.ErrCodeStorageInitFailed, err.Error(), false), dbDuration, 0)
+			domain.NewQueryError(domain.ErrCodeStorageInitFailed, backendErrorMessage(domain.ErrCodeStorageInitFailed), false), dbDuration, 0)
 		return
 	}
 
@@ -706,8 +709,9 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	// uploads running for queries that were already terminal.
 	writer, ref, err := store.Writer(ctx, record.ID, record.Options.ResultFormat)
 	if err != nil {
+		log.Printf("ERROR: query %s failed with %s: %v", record.ID, domain.ErrCodeStorageWriterFailed, err)
 		qm.finishRun(record, domain.StateFailed,
-			domain.NewQueryError(domain.ErrCodeStorageWriterFailed, err.Error(), false), dbDuration, 0)
+			domain.NewQueryError(domain.ErrCodeStorageWriterFailed, backendErrorMessage(domain.ErrCodeStorageWriterFailed), false), dbDuration, 0)
 		return
 	}
 
@@ -729,14 +733,14 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 
 	if encErr != nil {
 		deletePartial(store, ref, record.ID)
-		nextState, qErr := terminalFor(ctx, encErr, domain.ErrCodeStreamEncodeFailed)
+		nextState, qErr := terminalFor(ctx, record.ID, encErr, domain.ErrCodeStreamEncodeFailed)
 		qm.finishRun(record, nextState, qErr, dbDuration, storeDuration)
 		return
 	}
 
 	if closeErr != nil {
 		deletePartial(store, ref, record.ID)
-		nextState, qErr := terminalFor(ctx, closeErr, domain.ErrCodeStorageFinalizeFailed)
+		nextState, qErr := terminalFor(ctx, record.ID, closeErr, domain.ErrCodeStorageFinalizeFailed)
 		qm.finishRun(record, nextState, qErr, dbDuration, storeDuration)
 		return
 	}
@@ -830,18 +834,43 @@ func (qm *QueryManager) progressReporter(ctx context.Context, record *domain.Que
 	return report, stop
 }
 
+// backendErrorMessage returns the fixed, caller-facing text for a query-level
+// error code. The driver or storage error behind that code can carry a host, a
+// user, a bucket name or other backend internals, so it never becomes the
+// message itself - see the callers of this function, which log the real error
+// keyed by query ID instead.
+func backendErrorMessage(code domain.QueryErrorCode) string {
+	switch code {
+	case domain.ErrCodeDBExecFailed:
+		return "the database driver failed to execute the query"
+	case domain.ErrCodeStorageInitFailed:
+		return "the result storage backend failed to initialize"
+	case domain.ErrCodeStorageWriterFailed:
+		return "the result storage backend failed to open a writer"
+	case domain.ErrCodeStreamEncodeFailed:
+		return "encoding the result stream failed"
+	case domain.ErrCodeStorageFinalizeFailed:
+		return "the result storage backend failed to finalize the result"
+	default:
+		return "the query failed"
+	}
+}
+
 // terminalFor maps an execution failure to the terminal state the state machine
 // asks for: an explicit stop is CANCELED, an expired deadline is a FAILED with
-// its own code, anything else keeps the caller's code. The context is consulted
-// as well because drivers wrap or replace the cancellation error.
-func terminalFor(ctx context.Context, err error, fallback domain.QueryErrorCode) (domain.QueryState, *domain.QueryError) {
+// its own code, anything else is FAILED with a fixed, generic message for
+// fallback - the real error is logged in full, keyed by queryID, and never
+// returned to the caller (see backendErrorMessage). The context is consulted as
+// well because drivers wrap or replace the cancellation error.
+func terminalFor(ctx context.Context, queryID string, err error, fallback domain.QueryErrorCode) (domain.QueryState, *domain.QueryError) {
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(ctx.Err(), context.Canceled):
 		return domain.StateCanceled, nil
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return domain.StateFailed, domain.NewQueryError(domain.ErrCodeQueryTimeout, "query exceeded its timeout", true)
 	default:
-		return domain.StateFailed, domain.NewQueryError(fallback, err.Error(), false)
+		log.Printf("ERROR: query %s failed with %s: %v", queryID, fallback, err)
+		return domain.StateFailed, domain.NewQueryError(fallback, backendErrorMessage(fallback), false)
 	}
 }
 
