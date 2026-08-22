@@ -241,16 +241,6 @@ type minioEndpoint struct {
 	bucket   string
 }
 
-func startMinIO(t *testing.T) minioEndpoint {
-	t.Helper()
-	ep, c, err := newMinIOContainer(context.Background())
-	if err != nil {
-		t.Fatalf("start minio: %v", err)
-	}
-	terminate(t, c)
-	return ep
-}
-
 // newMinIOContainer starts a MinIO container with a bucket ready to use and
 // hands the container back rather than tying its lifetime to a *testing.T, so
 // a caller that needs it to outlive a single test - ensureS3Store below - can
@@ -303,31 +293,46 @@ var (
 	sharedS3Once sync.Once
 	sharedS3Ep   minioEndpoint
 	sharedS3C    testcontainers.Container
+	sharedS3Err  error
 )
 
 // ensureS3Store lazily brings up one MinIO container and registers it as the
 // "s3" storage backend, then returns its endpoint. storage.Register panics on
 // a second registration under the same name and there is no way to
 // unregister, so every test that needs the "s3" backend has to share this one
-// registration. Unlike startMinIO, the container this returns is not torn
-// down at the end of whichever test happens to trigger it - a later test may
-// still need it - so TestMain terminates it once the whole binary is done.
+// registration. The container this returns is not torn down at the end of
+// whichever test happens to trigger it - a later test may still need it - so
+// TestMain terminates it once the whole binary is done.
 func ensureS3Store(t *testing.T) minioEndpoint {
 	t.Helper()
 	sharedS3Once.Do(func() {
 		ep, c, err := newMinIOContainer(context.Background())
-		if err != nil {
-			t.Fatalf("start shared minio: %v", err)
-		}
+		// Record whatever container came back, even on failure, before checking
+		// err: newMinIOContainer can fail after the container is already up (a
+		// bucket create failure, say), and sharedS3C is what lets TestMain tear
+		// it down instead of leaking it for the rest of the run.
 		sharedS3C = c
+		if err != nil {
+			sharedS3Err = fmt.Errorf("start shared minio: %w", err)
+			return
+		}
 		sharedS3Ep = ep
 
 		store, err := s3.NewS3ResultStore(context.Background(), ep.bucket, "us-east-1", ep.endpoint, ep.keyID, ep.secret)
 		if err != nil {
-			t.Fatalf("NewS3ResultStore: %v", err)
+			sharedS3Err = fmt.Errorf("NewS3ResultStore: %w", err)
+			return
 		}
 		storage.Register("s3", store)
 	})
+	// sync.Once.Do still marks itself done when f calls t.Fatalf (runtime.Goexit
+	// runs the deferred done.Store(1) on the way out), so a failure inside the
+	// closure above must not itself call t.Fatalf: every caller, not just the
+	// first, has to see it and fail loudly rather than get a zero-value
+	// endpoint silently.
+	if sharedS3Err != nil {
+		t.Fatalf("shared minio unavailable: %v", sharedS3Err)
+	}
 	return sharedS3Ep
 }
 
@@ -379,6 +384,7 @@ var (
 	sharedCHDSN   string
 	sharedCHC     testcontainers.Container
 	sharedCHStore *clickhousestore.ClickHouseResultStore
+	sharedCHErr   error
 )
 
 // ensureClickHouseStore lazily brings up one ClickHouse container and
@@ -397,19 +403,28 @@ func ensureClickHouseStore(t *testing.T) string {
 	t.Helper()
 	sharedCHOnce.Do(func() {
 		dsn, c, err := newClickHouseContainer(context.Background())
-		if err != nil {
-			t.Fatalf("start shared clickhouse: %v", err)
-		}
+		// Record whatever container came back, even on failure, before checking
+		// err - see the matching comment in ensureS3Store.
 		sharedCHC = c
+		if err != nil {
+			sharedCHErr = fmt.Errorf("start shared clickhouse: %w", err)
+			return
+		}
 		sharedCHDSN = dsn
 
 		store, err := clickhousestore.NewClickHouseResultStore(dsn, chTable)
 		if err != nil {
-			t.Fatalf("NewClickHouseResultStore: %v", err)
+			sharedCHErr = fmt.Errorf("NewClickHouseResultStore: %w", err)
+			return
 		}
 		sharedCHStore = store
 		storage.Register("clickhouse", store)
 	})
+	// See ensureS3Store: sync.Once.Do marks itself done even on a t.Fatalf
+	// inside f, so the failure has to be surfaced to every caller here instead.
+	if sharedCHErr != nil {
+		t.Fatalf("shared clickhouse unavailable: %v", sharedCHErr)
+	}
 	return sharedCHDSN
 }
 

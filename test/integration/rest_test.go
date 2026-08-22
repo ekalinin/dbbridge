@@ -183,7 +183,7 @@ func TestRedis_WebSocketOnANonOwner(t *testing.T) {
 //
 // The "s3" storage backend is registered once, process-wide (storage.Register
 // panics on a second registration under the same name), so this test shares
-// it through ensureS3Store rather than starting its own MinIO via startMinIO:
+// it through ensureS3Store rather than starting its own MinIO container:
 // a container scoped to this test alone would be torn down at the end of it,
 // but TestS3_ResultRoundTrip (integration_test.go) may run first and claim
 // the registration for a container of its own.

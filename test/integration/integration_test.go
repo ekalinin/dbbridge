@@ -16,7 +16,6 @@ import (
 
 	"github.com/ekalinin/dbbridge/internal/core/domain"
 	"github.com/ekalinin/dbbridge/internal/state"
-	"github.com/ekalinin/dbbridge/internal/storage"
 	"github.com/ekalinin/dbbridge/internal/storage/backends/s3"
 )
 
@@ -147,9 +146,6 @@ func TestS3_ResultRoundTrip(t *testing.T) {
 		minio.endpoint, minio.keyID, minio.secret)
 	if err != nil {
 		t.Fatalf("NewS3ResultStore: %v", err)
-	}
-	if _, err := storage.GetStore("s3"); err != nil {
-		storage.Register("s3", store)
 	}
 
 	h := newHarness(t, harnessOptions{
