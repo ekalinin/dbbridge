@@ -13,8 +13,10 @@ package integration
 import (
 	"context"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +28,8 @@ import (
 	"github.com/ekalinin/dbbridge/internal/state"
 	"github.com/ekalinin/dbbridge/internal/storage"
 	"github.com/ekalinin/dbbridge/internal/storage/backends/fs"
+	"github.com/ekalinin/dbbridge/internal/storage/backends/s3"
+	"github.com/ekalinin/dbbridge/internal/transport/rest"
 
 	_ "github.com/ekalinin/dbbridge/internal/db/drivers/mysql"
 	_ "github.com/ekalinin/dbbridge/internal/db/drivers/postgres"
@@ -62,6 +66,16 @@ func TestMain(m *testing.M) {
 	storage.Register("fs", store)
 
 	code := m.Run()
+
+	// The shared "s3" container, if any test used one, is only started via
+	// ensureS3Store and is never bound to a single test's cleanup - it has to
+	// be torn down here instead.
+	if sharedS3C != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_ = sharedS3C.Terminate(ctx)
+		cancel()
+	}
+
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }
@@ -213,21 +227,31 @@ type minioEndpoint struct {
 
 func startMinIO(t *testing.T) minioEndpoint {
 	t.Helper()
-	ctx := context.Background()
-
-	c, err := tcminio.Run(ctx, "minio/minio:RELEASE.2025-09-07T16-13-09Z")
+	ep, c, err := newMinIOContainer(context.Background())
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
 	}
 	terminate(t, c)
+	return ep
+}
+
+// newMinIOContainer starts a MinIO container with a bucket ready to use and
+// hands the container back rather than tying its lifetime to a *testing.T, so
+// a caller that needs it to outlive a single test - ensureS3Store below - can
+// decide when it gets torn down.
+func newMinIOContainer(ctx context.Context) (minioEndpoint, testcontainers.Container, error) {
+	c, err := tcminio.Run(ctx, "minio/minio:RELEASE.2025-09-07T16-13-09Z")
+	if err != nil {
+		return minioEndpoint{}, nil, err
+	}
 
 	host, err := c.Host(ctx)
 	if err != nil {
-		t.Fatalf("minio host: %v", err)
+		return minioEndpoint{}, c, err
 	}
 	port, err := c.MappedPort(ctx, "9000/tcp")
 	if err != nil {
-		t.Fatalf("minio port: %v", err)
+		return minioEndpoint{}, c, err
 	}
 
 	ep := minioEndpoint{
@@ -244,17 +268,51 @@ func startMinIO(t *testing.T) minioEndpoint {
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ep.keyID, ep.secret, "")),
 	)
 	if err != nil {
-		t.Fatalf("aws config: %v", err)
+		return minioEndpoint{}, c, err
 	}
 	client := awss3.NewFromConfig(cfg, func(o *awss3.Options) {
 		o.BaseEndpoint = aws.String(ep.endpoint)
 		o.UsePathStyle = true
 	})
 	if _, err := client.CreateBucket(ctx, &awss3.CreateBucketInput{Bucket: aws.String(ep.bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
+		return minioEndpoint{}, c, err
 	}
 
-	return ep
+	return ep, c, nil
+}
+
+// sharedS3 holds the single MinIO container that backs the "s3" storage
+// backend for the whole test binary.
+var (
+	sharedS3Once sync.Once
+	sharedS3Ep   minioEndpoint
+	sharedS3C    testcontainers.Container
+)
+
+// ensureS3Store lazily brings up one MinIO container and registers it as the
+// "s3" storage backend, then returns its endpoint. storage.Register panics on
+// a second registration under the same name and there is no way to
+// unregister, so every test that needs the "s3" backend has to share this one
+// registration. Unlike startMinIO, the container this returns is not torn
+// down at the end of whichever test happens to trigger it - a later test may
+// still need it - so TestMain terminates it once the whole binary is done.
+func ensureS3Store(t *testing.T) minioEndpoint {
+	t.Helper()
+	sharedS3Once.Do(func() {
+		ep, c, err := newMinIOContainer(context.Background())
+		if err != nil {
+			t.Fatalf("start shared minio: %v", err)
+		}
+		sharedS3C = c
+		sharedS3Ep = ep
+
+		store, err := s3.NewS3ResultStore(context.Background(), ep.bucket, "us-east-1", ep.endpoint, ep.keyID, ep.secret)
+		if err != nil {
+			t.Fatalf("NewS3ResultStore: %v", err)
+		}
+		storage.Register("s3", store)
+	})
+	return sharedS3Ep
 }
 
 // harness wires a full service against the given backends.
@@ -337,6 +395,15 @@ databases:
 		qm:  qm,
 		ms:  ms,
 	}
+}
+
+// newRESTServer puts the REST transport in front of a harness, so a test can
+// drive the API the way a client does rather than calling the service directly.
+func newRESTServer(t *testing.T, h *harness) string {
+	t.Helper()
+	srv := httptest.NewServer(rest.NewServer(h.svc, rest.Options{}).Handler())
+	t.Cleanup(srv.Close)
+	return srv.URL
 }
 
 // pgDatabases is the databases section for a PostgreSQL target.

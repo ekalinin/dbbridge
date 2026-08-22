@@ -137,7 +137,11 @@ func TestMySQL_EndToEnd(t *testing.T) {
 func TestS3_ResultRoundTrip(t *testing.T) {
 	redisAddr := startRedis(t)
 	dsn := startPostgres(t)
-	minio := startMinIO(t)
+	// The "s3" backend is shared process-wide (storage.Register panics on a
+	// second registration under the same name), so its container has to
+	// outlive this one test - ensureS3Store, unlike startMinIO, does not tear
+	// it down when this test finishes.
+	minio := ensureS3Store(t)
 
 	store, err := s3.NewS3ResultStore(context.Background(), minio.bucket, "us-east-1",
 		minio.endpoint, minio.keyID, minio.secret)
