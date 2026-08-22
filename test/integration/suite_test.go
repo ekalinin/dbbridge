@@ -1,11 +1,11 @@
 //go:build integration
 
 // Package integration exercises dbbridge against the real backends it targets:
-// Redis, PostgreSQL, MySQL and S3 (MinIO). Everything else in the test suite
-// runs on the in-memory MetaStore, the local filesystem and fake drivers, so
-// the code paths that only exist for the real backends - Lua scripts, lease key
-// expiry, pgx and MySQL type mapping, multipart uploads - had no coverage at
-// all.
+// Redis, PostgreSQL, MySQL, S3 (MinIO) and ClickHouse. Everything else in the
+// test suite runs on the in-memory MetaStore, the local filesystem and fake
+// drivers, so the code paths that only exist for the real backends - Lua
+// scripts, lease key expiry, pgx and MySQL type mapping, multipart uploads,
+// ClickHouse's line-splitting write path - had no coverage at all.
 //
 // Run with: make test-containers (requires a Docker daemon).
 package integration
@@ -27,6 +27,7 @@ import (
 	"github.com/ekalinin/dbbridge/internal/lifecycle"
 	"github.com/ekalinin/dbbridge/internal/state"
 	"github.com/ekalinin/dbbridge/internal/storage"
+	clickhousestore "github.com/ekalinin/dbbridge/internal/storage/backends/clickhouse"
 	"github.com/ekalinin/dbbridge/internal/storage/backends/fs"
 	"github.com/ekalinin/dbbridge/internal/storage/backends/s3"
 	"github.com/ekalinin/dbbridge/internal/transport/rest"
@@ -39,6 +40,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/testcontainers/testcontainers-go"
+	tcclickhouse "github.com/testcontainers/testcontainers-go/modules/clickhouse"
 	tcminio "github.com/testcontainers/testcontainers-go/modules/minio"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -73,6 +75,20 @@ func TestMain(m *testing.M) {
 	if sharedS3C != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		_ = sharedS3C.Terminate(ctx)
+		cancel()
+	}
+
+	// Same reasoning for the shared "clickhouse" store and container, started
+	// lazily via ensureClickHouseStore: close the store's connection pool
+	// before terminating the server it points at.
+	if sharedCHStore != nil {
+		if err := sharedCHStore.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "close clickhouse store:", err)
+		}
+	}
+	if sharedCHC != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_ = sharedCHC.Terminate(ctx)
 		cancel()
 	}
 
@@ -315,6 +331,88 @@ func ensureS3Store(t *testing.T) minioEndpoint {
 	return sharedS3Ep
 }
 
+// chTable is the results table the shared ClickHouse store is pointed at.
+const chTable = "dbbridge_results"
+
+// newClickHouseContainer starts a ClickHouse container and returns a DSN for
+// it, without tying its lifetime to a *testing.T - the same split as
+// newMinIOContainer above, for the same reason: ensureClickHouseStore needs
+// the container to outlive whichever single test happens to start it.
+func newClickHouseContainer(ctx context.Context) (string, testcontainers.Container, error) {
+	c, err := tcclickhouse.Run(ctx, "clickhouse/clickhouse-server:24.8-alpine",
+		tcclickhouse.WithUsername("dbbridge"),
+		tcclickhouse.WithPassword("dbbridge"),
+		tcclickhouse.WithDatabase("dbbridge"),
+		// The module's own default wait strategy is an HTTP health check on
+		// 8123, which is what actually gates readiness; replacing it with a
+		// plain "is 9000 listening" check let the native protocol port accept
+		// TCP connections before the server could complete a handshake on it,
+		// and NewClickHouseResultStore failed with "read: EOF" while creating
+		// the results table. Keep the same HTTP check, just with more time
+		// for a cold image pull.
+		testcontainers.WithWaitStrategy(
+			wait.ForHTTP("/").WithPort("8123/tcp").
+				WithStatusCodeMatcher(func(status int) bool { return status == 200 }).
+				WithStartupTimeout(2*time.Minute),
+		),
+	)
+	if err != nil {
+		return "", nil, err
+	}
+
+	host, err := c.Host(ctx)
+	if err != nil {
+		return "", c, err
+	}
+	port, err := c.MappedPort(ctx, "9000/tcp")
+	if err != nil {
+		return "", c, err
+	}
+
+	return fmt.Sprintf("clickhouse://dbbridge:dbbridge@%s:%s/dbbridge", host, port.Port()), c, nil
+}
+
+// sharedClickHouse holds the single ClickHouse container, DSN and store that
+// back the "clickhouse" storage backend for the whole test binary.
+var (
+	sharedCHOnce  sync.Once
+	sharedCHDSN   string
+	sharedCHC     testcontainers.Container
+	sharedCHStore *clickhousestore.ClickHouseResultStore
+)
+
+// ensureClickHouseStore lazily brings up one ClickHouse container and
+// registers it as the "clickhouse" storage backend, then returns its DSN.
+// ClickHouse backs the ResultStore, not a query target: it is the only
+// storage backend with no live coverage, and its line-splitting write path
+// cannot be checked in-memory. It follows the same shared-registration shape
+// as ensureS3Store above, rather than the container living inside a single
+// test: storage.Register panics on a second registration under the same
+// name and there is no way to unregister, so every test that needs the
+// "clickhouse" backend has to share this one registration. The container is
+// not torn down at the end of whichever test happens to trigger it - a later
+// test may still need it - so TestMain terminates it once the whole binary
+// is done.
+func ensureClickHouseStore(t *testing.T) string {
+	t.Helper()
+	sharedCHOnce.Do(func() {
+		dsn, c, err := newClickHouseContainer(context.Background())
+		if err != nil {
+			t.Fatalf("start shared clickhouse: %v", err)
+		}
+		sharedCHC = c
+		sharedCHDSN = dsn
+
+		store, err := clickhousestore.NewClickHouseResultStore(dsn, chTable)
+		if err != nil {
+			t.Fatalf("NewClickHouseResultStore: %v", err)
+		}
+		sharedCHStore = store
+		storage.Register("clickhouse", store)
+	})
+	return sharedCHDSN
+}
+
 // harness wires a full service against the given backends.
 type harness struct {
 	svc *service.QueryService
@@ -329,11 +427,17 @@ type harnessOptions struct {
 	defaultStorage string
 	storageSection string
 	metaStore      state.MetaStore
+	// gcInterval overrides how often garbage collection runs; 0 keeps the
+	// one-minute default, which is long enough never to fire during a test.
+	gcInterval time.Duration
 }
 
 func newHarness(t *testing.T, opts harnessOptions) *harness {
 	t.Helper()
 
+	if opts.gcInterval == 0 {
+		opts.gcInterval = time.Minute
+	}
 	if opts.defaultStorage == "" {
 		opts.defaultStorage = "fs"
 	}
@@ -348,6 +452,7 @@ instance:
   redis_addr: %q
   default_storage: %s
   heartbeat_ttl: 1s
+  gc_interval: %s
 server:
   rest_addr: ":0"
   grpc_addr: ":0"
@@ -357,7 +462,7 @@ storage:
 %s
 databases:
 %s
-`, opts.instanceID, opts.redisAddr, opts.defaultStorage, opts.storageSection, opts.databases)
+`, opts.instanceID, opts.redisAddr, opts.defaultStorage, opts.gcInterval, opts.storageSection, opts.databases)
 
 	path := filepath.Join(t.TempDir(), "dbbridge.yaml")
 	if err := os.WriteFile(path, []byte(cfgBody), 0o600); err != nil {

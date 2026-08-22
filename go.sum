@@ -255,6 +255,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/testcontainers/testcontainers-go v0.44.0 h1:/Fwh6HY1mIikhnm9e7HwoxGycx0lzRAE0f5VQpjFxzI=
 github.com/testcontainers/testcontainers-go v0.44.0/go.mod h1:IcnwQrYTO86xHXu5bvMaBH7ATlbS3Qn1M1QWW3c66rE=
+github.com/testcontainers/testcontainers-go/modules/clickhouse v0.44.0 h1:TOkNKu7FrJIfozRhcRM3iVURfb32Aw/CIuh1lXrDFjw=
+github.com/testcontainers/testcontainers-go/modules/clickhouse v0.44.0/go.mod h1:/9m3N7gu2ErXf7bUdK/u6KY0X19gRrWZjiDtqmctlhI=
 github.com/testcontainers/testcontainers-go/modules/minio v0.44.0 h1:pL6fNLanz9f/IhVr50U877HcAB1Zyfa+7Wo182K6T6o=
 github.com/testcontainers/testcontainers-go/modules/minio v0.44.0/go.mod h1:tE8z7l7xrs6QZgyM28lryrAdQhfT66kBA0fFUni7rPc=
 github.com/testcontainers/testcontainers-go/modules/mysql v0.44.0 h1:oJPJPxNE6YQ0zlq6mZKh06JOlyimCky4ruQUimdDet4=
