@@ -43,7 +43,7 @@ var globalResultsDir string
 func TestMain(m *testing.M) {
 	db.Register("postgres", fakeDriver{})
 	db.Register("mysql", slowDriver{})
-	db.Register("clickhouse", failDriver{})
+	db.Register("clickhouse", failToExecDriver{})
 
 	tmpDir, err := os.MkdirTemp("", "dbbridge-e2e-results-*")
 	if err != nil {
@@ -364,25 +364,31 @@ func (slowPool) Stat() db.PoolStat { return db.PoolStat{} }
 // Close closes the pool.
 func (slowPool) Close() error { return nil }
 
-// failDriver opens pools whose Exec always fails, so the FAILED path can be
-// reached over the public API. Ping succeeds: the failure has to happen during
-// execution, not during admission.
-type failDriver struct{}
+// failToExecDriver opens pools whose Exec always fails, so the FAILED path can
+// be reached over the public API. Ping succeeds: the failure has to happen
+// during execution, not during admission. Named to be visible next to
+// internal/testutil.FailToOpenDriver, which is registered under the same
+// "clickhouse" engine name in that package's own test binary but fails in
+// Open instead - the two never run in the same binary, but a reader jumping
+// between the two suites should not assume one behavior from the other.
+type failToExecDriver struct{}
 
-func (failDriver) Open(_ context.Context, _ string, _ int) (db.Pool, error) {
-	return failPool{}, nil
+func (failToExecDriver) Open(_ context.Context, _ string, _ int) (db.Pool, error) {
+	return failToExecPool{}, nil
 }
 
-type failPool struct{}
+type failToExecPool struct{}
 
 // errExecFailure carries a DSN-shaped secret so a test can assert the API does
 // not echo the driver error back to the caller.
 var errExecFailure = errors.New("relation \"users\" does not exist (host=db.internal user=admin password=hunter2)")
 
-func (failPool) Exec(_ context.Context, _ string) (db.RowStream, error) { return nil, errExecFailure }
-func (failPool) Ping(_ context.Context) error                           { return nil }
-func (failPool) Stat() db.PoolStat                                      { return db.PoolStat{} }
-func (failPool) Close() error                                           { return nil }
+func (failToExecPool) Exec(_ context.Context, _ string) (db.RowStream, error) {
+	return nil, errExecFailure
+}
+func (failToExecPool) Ping(_ context.Context) error { return nil }
+func (failToExecPool) Stat() db.PoolStat            { return db.PoolStat{} }
+func (failToExecPool) Close() error                 { return nil }
 
 // lineStore is a stand-in for the ClickHouse ResultStore: it stores bytes
 // verbatim on the filesystem but declares the same format contract, so a

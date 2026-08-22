@@ -182,7 +182,10 @@ func (s *fakeRowStream) Close() error { return nil }
 // FailToOpenDriver's pools never open. The error echoes the DSN back, the way
 // a real pgx/mysql/clickhouse driver's connection-refused error does, so tests
 // can exercise a database that fails during config reload (rather than during
-// query execution, which FakeDriver and SlowDriver already cover).
+// query execution, which FakeDriver and SlowDriver already cover). Registered
+// under "clickhouse" like test/e2e/suite_test.go's failToExecDriver, but the
+// two never share a binary and fail at different points - Open here, Exec
+// there - so do not assume one's behavior from the other.
 type FailToOpenDriver struct{}
 
 func (FailToOpenDriver) Open(_ context.Context, dsn string, _ int) (db.Pool, error) {

@@ -120,6 +120,10 @@ func TestSQLGuard_RejectsWrites(t *testing.T) {
 			}
 			decodeJSON(t, resp.Body, &envelope)
 			// The rejection explains the rule; it never echoes the statement.
+			// sqlguard.ReadOnly's messages are fixed strings that name only a
+			// keyword or verb, never the statement itself, so this cannot fail
+			// today - it is a guard against someone later making the rejection
+			// echo the SQL text.
 			if strings.Contains(envelope.Error, "users") {
 				t.Errorf("rejection echoes the statement back: %s", envelope.Error)
 			}

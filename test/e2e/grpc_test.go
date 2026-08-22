@@ -181,6 +181,9 @@ func TestConnect_ErrorCodesAreTyped(t *testing.T) {
 		t.Errorf("unknown database = %v, want not found", got)
 	}
 	if err != nil {
+		// domain.NotFoundError's message is a fixed "database <id> not found",
+		// so this loop cannot fail today - it is a guard against someone later
+		// making the not-found path echo a driver or config error instead.
 		for _, leak := range []string{"dsn", "password", "postgres://"} {
 			if bytes.Contains(bytes.ToLower([]byte(err.Error())), []byte(leak)) {
 				t.Errorf("error message leaks %q: %v", leak, err)

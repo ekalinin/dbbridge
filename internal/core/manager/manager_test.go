@@ -21,6 +21,8 @@ import (
 	"github.com/ekalinin/dbbridge/internal/state"
 	"github.com/ekalinin/dbbridge/internal/storage"
 	"github.com/ekalinin/dbbridge/internal/storage/backends/fs"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 var resultsDir string
@@ -47,6 +49,7 @@ func TestMain(m *testing.M) {
 	storage.Register(badCloseBackend, badCloseStore{})
 	storage.Register(badDeleteBackend, badDeleteStore{})
 	storage.Register(textOnlyBackend, textOnlyStore{})
+	storage.Register(badWriterBackend, badWriterStore{})
 
 	code := m.Run()
 	os.RemoveAll(dir)
@@ -547,7 +550,9 @@ func TestSubmitQuery_StoresNormalizedOptions(t *testing.T) {
 
 // TestRun_WriterCloseFailureFailsQuery covers I4: for S3 and ClickHouse it is
 // Close that waits for the upload and returns its error, so ignoring it marked
-// queries SUCCEEDED with no result behind them.
+// queries SUCCEEDED with no result behind them. It also covers the
+// STORAGE_FINALIZE_FAILED branch of the no-echo fix: failingCloser.Close
+// carries a DSN-shaped secret, and the caller must never see it.
 func TestRun_WriterCloseFailureFailsQuery(t *testing.T) {
 	qm, _ := newManager(t)
 	rec, err := qm.SubmitQuery(context.Background(), "testdb", "SELECT 1",
@@ -565,6 +570,106 @@ func TestRun_WriterCloseFailureFailsQuery(t *testing.T) {
 	}
 	if final.Result != nil {
 		t.Errorf("failed query carries a Result ref: %+v", final.Result)
+	}
+	if final.Error != nil && strings.Contains(final.Error.Message, "hunter2") {
+		t.Errorf("error message leaks the storage backend error: %q", final.Error.Message)
+	}
+}
+
+// TestRun_StorageWriterFailureDoesNotLeakBackendError covers the
+// STORAGE_WRITER_FAILED site: badWriterStore fails store.Writer itself
+// (rather than the eventual Close, which TestRun_WriterCloseFailureFailsQuery
+// covers), and its error carries a DSN-shaped secret that must not reach the
+// caller.
+func TestRun_StorageWriterFailureDoesNotLeakBackendError(t *testing.T) {
+	qm, _ := newManager(t)
+	rec, err := qm.SubmitQuery(context.Background(), "testdb", "SELECT 1",
+		domain.QueryOptions{Mode: "async", StorageBackend: badWriterBackend})
+	if err != nil {
+		t.Fatalf("SubmitQuery: %v", err)
+	}
+
+	final := pollTerminal(t, qm, rec.ID, 5*time.Second)
+	if final.State != domain.StateFailed {
+		t.Fatalf("state = %s, want FAILED", final.State)
+	}
+	if final.Error == nil || final.Error.Code != domain.ErrCodeStorageWriterFailed {
+		t.Fatalf("error = %+v, want code %s", final.Error, domain.ErrCodeStorageWriterFailed)
+	}
+	if strings.Contains(final.Error.Message, "hunter2") {
+		t.Errorf("error message leaks the storage backend error: %q", final.Error.Message)
+	}
+}
+
+// TestRun_StorageInitFailureDoesNotLeakBackendError covers the
+// STORAGE_INIT_FAILED site directly: SubmitQuery already validates the
+// storage backend at admission, so an unregistered name never reaches run()
+// through the public API. run() is invoked directly with a record that names
+// one - the backend name itself carries the DSN-shaped secret, since it is
+// all storage.GetStore's error can echo back.
+func TestRun_StorageInitFailureDoesNotLeakBackendError(t *testing.T) {
+	qm, ms := newManager(t)
+
+	rec := &domain.QueryRecord{
+		ID:              "storage-init-1",
+		DatabaseID:      "testdb",
+		SQL:             "SELECT 1",
+		State:           domain.StatePending,
+		OwnerInstanceID: qm.instanceID,
+		CreatedAt:       time.Now(),
+		Options:         domain.QueryOptions{Mode: "async", StorageBackend: secretDSN},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	qm.run(ctx, rec, fastPool{}, cancel, trace.SpanContext{})
+
+	final, err := ms.GetQuery(context.Background(), rec.ID)
+	if err != nil {
+		t.Fatalf("GetQuery: %v", err)
+	}
+	if final.State != domain.StateFailed {
+		t.Fatalf("state = %s, want FAILED", final.State)
+	}
+	if final.Error == nil || final.Error.Code != domain.ErrCodeStorageInitFailed {
+		t.Fatalf("error = %+v, want code %s", final.Error, domain.ErrCodeStorageInitFailed)
+	}
+	if strings.Contains(final.Error.Message, "hunter2") {
+		t.Errorf("error message leaks the storage backend name: %q", final.Error.Message)
+	}
+}
+
+// TestRun_StreamEncodeFailureDoesNotLeakDriverError covers the
+// STREAM_ENCODE_FAILED site (via terminalFor): badColumnsStream fails in
+// Columns, the way a driver reports a broken result set, and the error - a
+// DSN-shaped secret - must not reach the caller.
+func TestRun_StreamEncodeFailureDoesNotLeakDriverError(t *testing.T) {
+	qm, ms := newManager(t)
+
+	rec := &domain.QueryRecord{
+		ID:              "stream-encode-1",
+		DatabaseID:      "testdb",
+		SQL:             "SELECT 1",
+		State:           domain.StatePending,
+		OwnerInstanceID: qm.instanceID,
+		CreatedAt:       time.Now(),
+		Options:         domain.QueryOptions{Mode: "async", StorageBackend: "fs"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	qm.run(ctx, rec, badColumnsPool{}, cancel, trace.SpanContext{})
+
+	final, err := ms.GetQuery(context.Background(), rec.ID)
+	if err != nil {
+		t.Fatalf("GetQuery: %v", err)
+	}
+	if final.State != domain.StateFailed {
+		t.Fatalf("state = %s, want FAILED", final.State)
+	}
+	if final.Error == nil || final.Error.Code != domain.ErrCodeStreamEncodeFailed {
+		t.Fatalf("error = %+v, want code %s", final.Error, domain.ErrCodeStreamEncodeFailed)
+	}
+	if strings.Contains(final.Error.Message, "hunter2") {
+		t.Errorf("error message leaks the driver error: %q", final.Error.Message)
 	}
 }
 
@@ -846,7 +951,15 @@ const (
 	badCloseBackend  = "badclose"
 	badDeleteBackend = "baddelete"
 	textOnlyBackend  = "textonly"
+	badWriterBackend = "badwriter"
 )
+
+// secretDSN stands in for the host, user and password a real driver or
+// storage error would spell out. It is planted in the fixtures below that
+// drive run()'s four no-echo sites (STORAGE_INIT_FAILED, STORAGE_WRITER_FAILED,
+// STREAM_ENCODE_FAILED, STORAGE_FINALIZE_FAILED), so a test can assert it
+// never reaches Error.Message - only the log line keyed by query ID.
+const secretDSN = "postgres://admin:hunter2@db.internal:5432/prod"
 
 // badCloseStore accepts every write and fails in Close, the way an S3 upload
 // that only fails when the multipart request completes does.
@@ -866,7 +979,9 @@ func (badCloseStore) Delete(_ context.Context, _ domain.ResultRef) error { retur
 type failingCloser struct{}
 
 func (failingCloser) Write(p []byte) (int, error) { return len(p), nil }
-func (failingCloser) Close() error                { return errors.New("upload did not complete") }
+func (failingCloser) Close() error {
+	return fmt.Errorf("upload did not complete: dial %s: connection refused", secretDSN)
+}
 
 // textOnlyStore stands in for the ClickHouse backend: it stores the result as
 // rows of text, so a binary format does not survive the round trip.
@@ -880,6 +995,45 @@ type badDeleteStore struct{ badCloseStore }
 func (badDeleteStore) Delete(_ context.Context, _ domain.ResultRef) error {
 	return errors.New("storage unavailable")
 }
+
+// badWriterStore fails to open a writer at all, the way a backend that cannot
+// be reached fails immediately rather than during the eventual Close - the
+// STORAGE_WRITER_FAILED site, as opposed to badCloseStore's
+// STORAGE_FINALIZE_FAILED.
+type badWriterStore struct{}
+
+func (badWriterStore) Writer(_ context.Context, _ string, _ string) (io.WriteCloser, domain.ResultRef, error) {
+	return nil, domain.ResultRef{}, fmt.Errorf("dial %s: connection refused", secretDSN)
+}
+func (badWriterStore) Reader(_ context.Context, _ domain.ResultRef) (io.ReadCloser, error) {
+	return nil, errors.New("not supported")
+}
+func (badWriterStore) Stat(_ context.Context, ref domain.ResultRef) (domain.ResultRef, error) {
+	return ref, nil
+}
+func (badWriterStore) Delete(_ context.Context, _ domain.ResultRef) error { return nil }
+
+// badColumnsPool's Exec succeeds but the returned stream fails in Columns, the
+// way a driver reports a broken result set before any row is read - the
+// STREAM_ENCODE_FAILED site.
+type badColumnsPool struct{}
+
+func (badColumnsPool) Exec(_ context.Context, _ string) (db.RowStream, error) {
+	return badColumnsStream{}, nil
+}
+func (badColumnsPool) Ping(_ context.Context) error { return nil }
+func (badColumnsPool) Stat() db.PoolStat            { return db.PoolStat{} }
+func (badColumnsPool) Close() error                 { return nil }
+
+type badColumnsStream struct{}
+
+func (badColumnsStream) Columns() ([]string, error) {
+	return nil, fmt.Errorf("dial %s: connection refused", secretDSN)
+}
+func (badColumnsStream) Next() bool        { return false }
+func (badColumnsStream) Scan(...any) error { return nil }
+func (badColumnsStream) Err() error        { return nil }
+func (badColumnsStream) Close() error      { return nil }
 
 // TestSubmitQuery_ConcurrencyLimit: without a cap, any client can open as many
 // queries as it likes, each holding a pool connection and a result file.
