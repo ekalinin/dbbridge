@@ -242,6 +242,10 @@ root through `os.Root` and the `s3` backend confines keys to its result prefix.
 **Errors.** Responses carry a category and, for input errors, a reason —
 never a wrapped driver error, which spells out the host, the user and the
 connection parameters. The full text goes to the log, keyed by request ID.
+One consequence is that a SQL syntax error and a database that drops mid-query
+are indistinguishable from the response alone - both surface as the generic
+`DB_EXEC_FAILED` message - so the query ID plus the server log entry it keys
+is the only way to tell them apart.
 
 ## 10. Lifecycle and Blue/Green (`internal/lifecycle`)
 
