@@ -29,3 +29,6 @@ configs/*-local.yaml
 # Environment
 .env
 .env.*
+
+# Local working docs
+docs/pr-*
