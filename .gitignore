@@ -32,3 +32,7 @@ configs/*-local.yaml
 
 # Local working docs
 docs/pr-*
+docs/*.claude.md
+docs/*.codex.md
+docs/spec-divergences.md
+docs/spec-implementation-review.md
