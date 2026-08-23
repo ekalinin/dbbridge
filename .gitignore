@@ -29,3 +29,10 @@ configs/*-local.yaml
 # Environment
 .env
 .env.*
+
+# Local working docs
+docs/pr-*
+docs/*.claude.md
+docs/*.codex.md
+docs/spec-divergences.md
+docs/spec-implementation-review.md
