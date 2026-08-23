@@ -26,8 +26,8 @@ server:
   # Browser origins allowed to open a WebSocket. Empty means same-origin only.
   ws_allowed_origins: []
   rate_limit:
-    # Per-caller request rate, keyed by authenticated subject or client address.
-    # 0 disables it.
+    # Per-caller request rate, keyed by client address: the limiter runs ahead
+    # of authentication. 0 disables it.
     requests_per_second: 0
     burst: 0
   tls:

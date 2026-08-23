@@ -97,8 +97,9 @@ func (s *Server) AdminHandler() http.Handler {
 }
 
 // rateLimit rejects a caller that is submitting faster than its budget. It runs
-// before authentication, so it is keyed by client address until an identity is
-// known; the per-subject key takes over once the auth middleware has run.
+// before authentication and is keyed by client address, so an unauthenticated
+// flood is rejected before any credential is checked and cannot be used to
+// probe tokens.
 func (s *Server) rateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The probes are called by the kubelet on a fixed schedule and must not
