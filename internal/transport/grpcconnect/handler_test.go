@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -120,6 +121,58 @@ func TestConnect_ReloadConfig(t *testing.T) {
 	}
 	if !resp.Msg.Success {
 		t.Errorf("reload success = false: %s", resp.Msg.Message)
+	}
+}
+
+// TestConnect_ReloadConfig_DoesNotLeakBackendError: ReloadConfig models a
+// failure as success=false plus a message, bypassing connectError entirely
+// (that is the response shape clients depend on and this test does not
+// change it). A database that fails to open can carry its DSN - host, user,
+// password - in the driver error, the same way pool.Ping's failure does
+// elsewhere in this codebase; the message here must not derive from it.
+func TestConnect_ReloadConfig_DoesNotLeakBackendError(t *testing.T) {
+	svc, _, cfgPath := testutil.NewServiceWithConfigFile(t)
+	h := grpcconnect.NewQueryHandler(svc)
+	mux := http.NewServeMux()
+	path, handler := dbbridgev1connect.NewQueryServiceHandler(h)
+	mux.Handle(path, handler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := dbbridgev1connect.NewQueryServiceClient(srv.Client(), srv.URL)
+
+	// Add a database on the "clickhouse" engine, which testutil registers to
+	// FailToOpenDriver: its Open() always fails, echoing the DSN back the way
+	// a real driver's connection-refused error does.
+	cur, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config file: %v", err)
+	}
+	const brokenDB = `
+  - id: baddb
+    engine: clickhouse
+    dsn: "clickhouse://svc_user:s3cr3t-pw@ch.internal.example:9000/analytics"
+    display_name: "Broken DB"
+    max_conns: 1
+`
+	if err := os.WriteFile(cfgPath, append(cur, []byte(brokenDB)...), 0o644); err != nil {
+		t.Fatalf("rewrite config file: %v", err)
+	}
+
+	resp, err := c.ReloadConfig(context.Background(), connect.NewRequest(&v1.ReloadConfigRequest{}))
+	if err != nil {
+		t.Fatalf("ReloadConfig: %v", err)
+	}
+	if resp.Msg.Success {
+		t.Fatal("reload reported success, want failure from the broken database")
+	}
+	if resp.Msg.Message == "" {
+		t.Fatal("empty failure message")
+	}
+	lower := strings.ToLower(resp.Msg.Message)
+	for _, leak := range []string{"dsn", "password", "s3cr3t", "svc_user", "clickhouse://", "ch.internal.example"} {
+		if strings.Contains(lower, leak) {
+			t.Errorf("reload message leaks %q: %s", leak, resp.Msg.Message)
+		}
 	}
 }
 

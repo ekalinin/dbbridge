@@ -104,9 +104,10 @@ const (
 	ErrCodeOwnerLost             QueryErrorCode = "OWNER_LOST"
 )
 
-// maxQueryErrorMessage bounds the driver text copied into a QueryError. The
-// message is readable by anyone holding the query ID, so it is truncated rather
-// than passed through in full.
+// maxQueryErrorMessage bounds a QueryError's message. Every current caller
+// passes a fixed, backend-agnostic string rather than a raw driver or storage
+// error, but the message is readable by anyone holding the query ID, so the
+// bound is kept as a defensive limit.
 const maxQueryErrorMessage = 512
 
 // QueryError encapsulates database or proxy-level query execution failures.

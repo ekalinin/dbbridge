@@ -52,7 +52,7 @@ test-unit:
 test-integration:
 	go test ./internal/... -count=1 -timeout 120s
 
-# Real backends in containers (Redis, PostgreSQL, MySQL, MinIO).
+# Real backends in containers (Redis, PostgreSQL, MySQL, MinIO, ClickHouse).
 # Requires a Docker daemon; skipped by every other target via the build tag.
 #
 # testcontainers does not read the docker CLI context, so under colima it has to

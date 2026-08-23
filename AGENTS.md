@@ -92,6 +92,7 @@ Proto definitions live under `api/proto/`. Generated Go code is at `internal/gen
 YAML config file path is passed via `-config` flag. Key fields:
 
 - `instance.metastore`: `"memory"` or `"redis"` — determines cluster mode
+- `instance.gc_interval`: how often expired results are swept; default `1m`
 - `instance.default_storage`: `"fs"`, `"s3"` or `"clickhouse"` — default result backend, captured at startup and not reloadable
 - `databases[].engine`: `postgres` | `mysql` | `clickhouse` | `oracle`
 - `storage.fs.root`: local directory for result files

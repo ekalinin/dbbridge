@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -337,5 +338,33 @@ func TestConfigTLSPair(t *testing.T) {
 				t.Errorf("TLS.Enabled() = %v, want %v", got, tc.enabled)
 			}
 		})
+	}
+}
+
+func TestValidate_GCIntervalDefaultsAndOverrides(t *testing.T) {
+	write := func(t *testing.T, body string) *Manager {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "dbbridge.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		m, err := NewManager(path)
+		if err != nil {
+			t.Fatalf("NewManager: %v", err)
+		}
+		return m
+	}
+
+	const base = `
+instance:
+  id: test
+  metastore: memory
+`
+	if got := write(t, base).Get().Instance.GCInterval; got != time.Minute {
+		t.Errorf("default gc_interval = %v, want 1m", got)
+	}
+
+	if got := write(t, base+"  gc_interval: 250ms\n").Get().Instance.GCInterval; got != 250*time.Millisecond {
+		t.Errorf("gc_interval = %v, want 250ms", got)
 	}
 }
