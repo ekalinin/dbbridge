@@ -14,8 +14,6 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 	"golang.org/x/time/rate"
-
-	"github.com/ekalinin/dbbridge/internal/authn"
 )
 
 // idleEviction is how long an unused limiter is kept before it is dropped, so
@@ -88,12 +86,11 @@ func (l *Limiter) purgeLocked(now time.Time) {
 	}
 }
 
-// KeyOf identifies the caller a request should be counted against: the
-// authenticated subject when there is one, the client address otherwise.
+// KeyOf identifies the caller a request should be counted against. The limiter
+// runs ahead of authentication - so that an unauthenticated flood is rejected
+// before any credential is checked and cannot be used to probe tokens - which
+// leaves the client address as the only identity a request carries.
 func KeyOf(r *http.Request) string {
-	if subject := authn.SubjectFromContext(r.Context()); subject != "" {
-		return "subject:" + subject
-	}
 	return "addr:" + clientAddr(r)
 }
 

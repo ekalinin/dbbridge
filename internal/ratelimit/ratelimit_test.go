@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/ekalinin/dbbridge/internal/authn"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 func TestLimiterAllowsUpToBurstThenRefuses(t *testing.T) {
@@ -38,16 +38,22 @@ func TestNilLimiterAllowsEverything(t *testing.T) {
 	}
 }
 
-func TestKeyOfPrefersSubject(t *testing.T) {
+func TestKeyOfUsesClientAddr(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/v1/databases", nil)
 	r.RemoteAddr = "203.0.113.7:5555"
 
 	if got := KeyOf(r); got != "addr:203.0.113.7" {
-		t.Errorf("KeyOf without an identity = %q, want addr:203.0.113.7", got)
+		t.Errorf("KeyOf = %q, want addr:203.0.113.7", got)
 	}
 
-	authed := r.WithContext(authn.WithIdentity(r.Context(), authn.Identity{Subject: "alice"}))
-	if got := KeyOf(authed); got != "subject:alice" {
-		t.Errorf("KeyOf with an identity = %q, want subject:alice", got)
+	// Behind a proxy the budget has to follow the client chi resolved, not the
+	// hop every caller shares.
+	r.Header.Set("X-Forwarded-For", "198.51.100.9")
+	var got string
+	middleware.ClientIPFromXFF()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		got = KeyOf(r)
+	})).ServeHTTP(httptest.NewRecorder(), r)
+	if got != "addr:198.51.100.9" {
+		t.Errorf("KeyOf behind a proxy = %q, want addr:198.51.100.9", got)
 	}
 }

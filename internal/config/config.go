@@ -71,8 +71,9 @@ type ServerConfig struct {
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
 }
 
-// RateLimitConfig caps the request rate of a single caller, keyed by
-// authenticated subject or, when authentication is off, by client address.
+// RateLimitConfig caps the request rate of a single caller, keyed by client
+// address: the limiter runs ahead of authentication, so an unauthenticated
+// flood is rejected before any credential is checked.
 type RateLimitConfig struct {
 	// RequestsPerSecond of 0 disables limiting.
 	RequestsPerSecond float64 `yaml:"requests_per_second"`
