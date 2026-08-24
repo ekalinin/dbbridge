@@ -266,6 +266,38 @@ detaches the execution context from the request, so the execution span cannot be
 a child of the transport span. It carries a `trace.Link` to it instead, which
 records the relationship without claiming the two share a lifetime.
 
+A submitted query therefore comes out as two trees:
+
+```
+POST /v1/queries                 transport, otelhttp / otelconnect
+└── StartQuery                   service
+                                 ⋮ trace.Link, not a parent edge (I1)
+query.run                        manager, root of the execution tree
+├── db.exec                      driver: submitting the statement
+├── db.rows                      driver: pulling the result set
+└── storage.write                backend: Writer through Close (I4)
+```
+
+The transport span adopts the caller's W3C trace context as its parent, so a
+trace opened by the calling application reaches the query it submits. Every
+`QueryService` method opens a span of its own - the read paths included, since a
+status poll or a download that sits waiting on the MetaStore is otherwise
+invisible. `DownloadResult` carries a `storage.read` span that ends when the
+reader is closed rather than when it is opened, which is the only way the time
+spent serving bytes shows up at all.
+
+The driver and store spans are the point of the exercise: "this query took 40
+minutes, was it the database or S3?" is answered by comparing `db.rows` against
+`storage.write`, not by reading `QueryStats` after the fact. They come from
+decorators applied by `db.OpenPool` and `storage.Register`, so a driver or a
+backend added later is instrumented without doing anything; `db.Unwrap` and
+`storage.Unwrap` reach the implementation underneath.
+
+`/healthz`, `/readyz` and `/metrics` are filtered out of the trace. They are
+scraped on a fixed schedule, so a span apiece would be most of the volume and
+none of the content. The transport instrumentation is tracing only: its own HTTP
+and RPC metrics are turned off, so the metric set stays the one listed above.
+
 ## 12. Repository Structure
 
 ```
@@ -299,7 +331,8 @@ share its error values.
 
 ## 13. Stack
 
-Go 1.26; `connectrpc.com/connect` + buf; `go-chi/chi`; `coder/websocket`; `redis/go-redis/v9`; `jackc/pgx/v5`, `go-sql-driver/mysql`, `ClickHouse/clickhouse-go/v2`, `sijms/go-ora`; `aws/aws-sdk-go-v2`; `parquet-go/parquet-go`; `go.opentelemetry.io/otel` + prometheus exporter; `golang.org/x/time/rate`; `testcontainers-go` and `alicebob/miniredis` for tests.
+Go 1.26; `connectrpc.com/connect` + buf; `go-chi/chi`; `coder/websocket`; `redis/go-redis/v9`; `jackc/pgx/v5`, `go-sql-driver/mysql`, `ClickHouse/clickhouse-go/v2`, `sijms/go-ora`; `aws/aws-sdk-go-v2`; `parquet-go/parquet-go`; `go.opentelemetry.io/otel` + prometheus exporter, with `otelhttp` and
+`otelconnect` instrumenting the transports; `golang.org/x/time/rate`; `testcontainers-go` and `alicebob/miniredis` for tests.
 
 Config is plain `gopkg.in/yaml.v3` with `${VAR}` expansion rather than viper or
 koanf: a single file, an atomic snapshot swap and an explicit `ReloadReport` is

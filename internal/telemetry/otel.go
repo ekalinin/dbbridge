@@ -33,6 +33,16 @@ func InitOTel(ctx context.Context, serviceName, otlpEndpoint string) (OTelShutdo
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
+	// Installed first, and whether or not there is an exporter. Propagation is
+	// what joins a caller's trace to ours; leaving it behind the endpoint check
+	// meant an incoming traceparent was dropped by every deployment that exports
+	// through a collector it configures elsewhere, and leaving it behind the
+	// metrics stack would drop it whenever that stack failed to come up.
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
 	mp, err := ensureMeterProvider(res, otlpEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics: %w", err)
@@ -61,10 +71,6 @@ func InitOTel(ctx context.Context, serviceName, otlpEndpoint string) (OTelShutdo
 		sdktrace.WithSpanProcessor(bsp),
 	)
 	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{},
-		propagation.Baggage{},
-	))
 
 	shutdown := func(shutdownCtx context.Context) error {
 		var errs []error

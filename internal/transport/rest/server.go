@@ -20,6 +20,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/metric/noop"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Options carries the transport limits. Zero values fall back to the defaults
@@ -68,6 +72,60 @@ type Server struct {
 	opts        Options
 }
 
+// untracedPaths are scraped on a fixed schedule by the kubelet and Prometheus.
+// A span per scrape is volume without information, so they are filtered out of
+// the trace entirely (spec §11).
+var untracedPaths = map[string]struct{}{
+	"/healthz": {},
+	"/readyz":  {},
+	"/metrics": {},
+}
+
+// traced wraps a router so an incoming request produces a server span and the
+// caller's W3C trace context becomes its parent - which is what joins a trace
+// started by the calling application to the query it submits.
+func traced(h http.Handler) http.Handler {
+	return otelhttp.NewHandler(h, "dbbridge",
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			_, skip := untracedPaths[r.URL.Path]
+			return !skip
+		}),
+		// otelhttp names the span before chi has routed the request, so only the
+		// method is known here; nameSpanAfterRoute fills in the pattern.
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return r.Method
+		}),
+		// Tracing only. The metric set is the one spec §11 defines, and
+		// otelhttp's own instruments would silently add to it.
+		otelhttp.WithMeterProvider(noop.NewMeterProvider()),
+	)
+}
+
+// nameSpanAfterRoute renames the transport span once chi has matched a route.
+// The raw path carries query IDs, so naming the span from it would give every
+// query a span name of its own; the route pattern is the name that groups.
+func nameSpanAfterRoute(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Renaming runs after the handler because chi resolves the pattern while
+		// routing, which happens past the middleware chain. The span is still
+		// open at this point: otelhttp ends it when this returns.
+		defer func() {
+			rctx := chi.RouteContext(r.Context())
+			if rctx == nil {
+				return
+			}
+			pattern := rctx.RoutePattern()
+			if pattern == "" {
+				return
+			}
+			span := trace.SpanFromContext(r.Context())
+			span.SetName(r.Method + " " + pattern)
+			span.SetAttributes(semconv.HTTPRoute(pattern))
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
 func NewServer(svc *service.QueryService, opts Options) *Server {
 	opts = opts.withDefaults()
 	s := &Server{
@@ -84,7 +142,7 @@ func NewServer(svc *service.QueryService, opts Options) *Server {
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.router
+	return traced(s.router)
 }
 
 // AdminHandler serves /metrics and /v1/admin/*. It is non-nil only when
@@ -93,7 +151,7 @@ func (s *Server) AdminHandler() http.Handler {
 	if s.adminRouter == nil {
 		return nil
 	}
-	return s.adminRouter
+	return traced(s.adminRouter)
 }
 
 // rateLimit rejects a caller that is submitting faster than its budget. It runs
@@ -121,6 +179,7 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 // requests were not logged at all, and a panic there reached the client as a
 // dropped connection instead of a 500.
 func (s *Server) useCommonMiddleware(r chi.Router) {
+	r.Use(nameSpanAfterRoute)
 	r.Use(middleware.RequestID)
 	// Without a hop count chi takes the right-most X-Forwarded-For entry, which
 	// is only the real client when exactly one trusted proxy sits in front of

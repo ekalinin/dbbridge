@@ -694,9 +694,10 @@ func registerSlowStore(t *testing.T) *slowStore {
 		return s
 	}
 	// storage.Register panics on a duplicate, so the first registration in this
-	// binary wins and later tests reuse it.
+	// binary wins and later tests reuse it. Unwrap takes the tracing wrapper off
+	// what the registry hands back.
 	existing, _ := storage.GetStore(slowBackend)
-	return existing.(*slowStore)
+	return storage.Unwrap(existing).(*slowStore)
 }
 
 func (s *slowStore) Writer(_ context.Context, queryID, format string) (io.WriteCloser, domain.ResultRef, error) {

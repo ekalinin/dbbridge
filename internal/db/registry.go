@@ -53,7 +53,9 @@ func Register(engine string, driver Driver) {
 	drivers[engine] = driver
 }
 
-// OpenPool opens a connection pool using a registered driver.
+// OpenPool opens a connection pool using a registered driver. The pool comes
+// back wrapped for tracing, so no driver has to remember to instrument itself
+// and no caller can open an uninstrumented one; Unwrap reaches the original.
 func OpenPool(ctx context.Context, engine string, dsn string, maxConns int) (Pool, error) {
 	driversMu.RLock()
 	driver, ok := drivers[engine]
@@ -61,5 +63,9 @@ func OpenPool(ctx context.Context, engine string, dsn string, maxConns int) (Poo
 	if !ok {
 		return nil, fmt.Errorf("db: unknown database engine %q", engine)
 	}
-	return driver.Open(ctx, dsn, maxConns)
+	pool, err := driver.Open(ctx, dsn, maxConns)
+	if err != nil {
+		return nil, err
+	}
+	return Traced(pool, engine), nil
 }

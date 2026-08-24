@@ -52,7 +52,9 @@ var (
 	stores   = make(map[string]ResultStore)
 )
 
-// Register registers a ResultStore backend.
+// Register registers a ResultStore backend. It is stored wrapped for tracing,
+// so no backend has to remember to instrument itself and no caller can reach an
+// uninstrumented one; Unwrap reaches the original.
 func Register(name string, store ResultStore) {
 	storesMu.Lock()
 	defer storesMu.Unlock()
@@ -62,7 +64,7 @@ func Register(name string, store ResultStore) {
 	if _, dup := stores[name]; dup {
 		panic("storage: Register called twice for store " + name)
 	}
-	stores[name] = store
+	stores[name] = Traced(store, name)
 }
 
 // GetStore retrieves a registered ResultStore backend.

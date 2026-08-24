@@ -11,8 +11,8 @@ import (
 	"github.com/ekalinin/dbbridge/internal/core/manager"
 	"github.com/ekalinin/dbbridge/internal/lifecycle"
 	"github.com/ekalinin/dbbridge/internal/storage"
+	"github.com/ekalinin/dbbridge/internal/telemetry"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -39,13 +39,13 @@ func (s *QueryService) SetAuthRequired(v bool) {
 	s.authRequired = v
 }
 
-func (s *QueryService) StartQuery(ctx context.Context, dbID string, sql string, opts domain.QueryOptions) (*domain.QueryRecord, error) {
-	ctx, span := otel.Tracer("dbbridge").Start(ctx, "StartQuery",
+func (s *QueryService) StartQuery(ctx context.Context, dbID string, sql string, opts domain.QueryOptions) (rec *domain.QueryRecord, err error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "StartQuery",
 		trace.WithAttributes(
 			attribute.String("query.database_id", dbID),
 			attribute.String("query.mode", opts.Mode),
 		))
-	defer span.End()
+	defer telemetry.EndSpan(span, &err)
 
 	if s.lifecycle.IsDraining() {
 		return nil, domain.DrainingError{}
@@ -78,18 +78,35 @@ func (s *QueryService) authorized(ctx context.Context, queryID string) (*domain.
 	return rec, nil
 }
 
-func (s *QueryService) GetQueryStatus(ctx context.Context, queryID string) (*domain.QueryRecord, error) {
+// queryScope starts a span for an operation that names a single query. The read
+// paths used to produce nothing at all, so a status poll or a download that sat
+// waiting on the MetaStore was invisible in a trace (spec §11).
+func queryScope(ctx context.Context, name, queryID string) (context.Context, trace.Span) {
+	return telemetry.Tracer().Start(ctx, name,
+		trace.WithAttributes(attribute.String("query.id", queryID)))
+}
+
+func (s *QueryService) GetQueryStatus(ctx context.Context, queryID string) (rec *domain.QueryRecord, err error) {
+	ctx, span := queryScope(ctx, "GetQueryStatus", queryID)
+	defer telemetry.EndSpan(span, &err)
+
 	return s.authorized(ctx, queryID)
 }
 
-func (s *QueryService) StopQuery(ctx context.Context, queryID string) error {
+func (s *QueryService) StopQuery(ctx context.Context, queryID string) (err error) {
+	ctx, span := queryScope(ctx, "StopQuery", queryID)
+	defer telemetry.EndSpan(span, &err)
+
 	if _, err := s.authorized(ctx, queryID); err != nil {
 		return err
 	}
 	return s.qm.StopQuery(ctx, queryID)
 }
 
-func (s *QueryService) GetQueryStats(ctx context.Context, queryID string) (domain.QueryStats, error) {
+func (s *QueryService) GetQueryStats(ctx context.Context, queryID string) (stats domain.QueryStats, err error) {
+	ctx, span := queryScope(ctx, "GetQueryStats", queryID)
+	defer telemetry.EndSpan(span, &err)
+
 	rec, err := s.authorized(ctx, queryID)
 	if err != nil {
 		return domain.QueryStats{}, err
@@ -97,7 +114,12 @@ func (s *QueryService) GetQueryStats(ctx context.Context, queryID string) (domai
 	return rec.Stats, nil
 }
 
-func (s *QueryService) DownloadResult(ctx context.Context, queryID string, offset, limit int64) (io.ReadCloser, domain.ResultRef, error) {
+func (s *QueryService) DownloadResult(ctx context.Context, queryID string, offset, limit int64) (body io.ReadCloser, out domain.ResultRef, err error) {
+	ctx, span := queryScope(ctx, "DownloadResult", queryID)
+	// The storage.read span opened below outlives this one: it ends when the
+	// caller closes the reader, which is after the bytes have been served.
+	defer telemetry.EndSpan(span, &err)
+
 	rec, err := s.authorized(ctx, queryID)
 	if err != nil {
 		return nil, domain.ResultRef{}, err
@@ -133,7 +155,10 @@ func (s *QueryService) DownloadResult(ctx context.Context, queryID string, offse
 	return reader, *rec.Result, nil
 }
 
-func (s *QueryService) ListDatabases(ctx context.Context) ([]domain.DatabaseInfo, error) {
+func (s *QueryService) ListDatabases(ctx context.Context) (infos []domain.DatabaseInfo, err error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "ListDatabases")
+	defer telemetry.EndSpan(span, &err)
+
 	// Extract databases from active configuration
 	cfg := s.qm.GetConfig()
 	databases := make([]domain.DatabaseInfo, 0, len(cfg.Databases))
@@ -177,7 +202,12 @@ func (s *QueryService) ListDatabases(ctx context.Context) ([]domain.DatabaseInfo
 	return databases, nil
 }
 
-func (s *QueryService) ReloadConfig(ctx context.Context) (domain.ReloadReport, error) {
+func (s *QueryService) ReloadConfig(ctx context.Context) (report domain.ReloadReport, err error) {
+	// Reload takes no context, so this span only marks the operation and its
+	// outcome - there is nothing below it to parent.
+	_, span := telemetry.Tracer().Start(ctx, "ReloadConfig")
+	defer telemetry.EndSpan(span, &err)
+
 	return s.qm.Reload()
 }
 
@@ -186,6 +216,9 @@ func (s *QueryService) ReloadConfig(ctx context.Context) (domain.ReloadReport, e
 // restarted under the same instance ID does not claim to be quiesced while
 // records it owns are still marked in-flight (I5, spec §10).
 func (s *QueryService) CanIBeStopped(ctx context.Context) (bool, int, lifecycle.State) {
+	ctx, span := telemetry.Tracer().Start(ctx, "CanIBeStopped")
+	defer span.End()
+
 	inFlight := s.qm.CountInFlight(ctx)
 	// A draining instance with nothing left in flight advances to STOPPABLE,
 	// the third lifecycle state the spec defines (§10).
@@ -204,7 +237,13 @@ func (s *QueryService) IsDraining() bool {
 	return s.lifecycle.IsDraining()
 }
 
-func (s *QueryService) WatchQuery(ctx context.Context, queryID string) (<-chan manager.QueryEvent, error) {
+// WatchQuery's span covers subscribing, not the subscription: the channel it
+// returns outlives the call, and a span that stayed open for the length of a
+// watch would only be exported once the client disconnected.
+func (s *QueryService) WatchQuery(ctx context.Context, queryID string) (events <-chan manager.QueryEvent, err error) {
+	ctx, span := queryScope(ctx, "WatchQuery", queryID)
+	defer telemetry.EndSpan(span, &err)
+
 	if _, err := s.authorized(ctx, queryID); err != nil {
 		return nil, err
 	}

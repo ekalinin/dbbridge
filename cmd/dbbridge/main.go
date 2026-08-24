@@ -207,6 +207,13 @@ func main() {
 	grpcHandler := grpcconnect.NewQueryHandler(svc)
 	grpcMux := http.NewServeMux()
 	var interceptors []connect.Interceptor
+	// First in the chain, so the rate limiter and the authenticator below run
+	// inside the span. Failing to instrument is not a reason not to serve.
+	if traceInterceptor, err := grpcconnect.TracingInterceptor(); err != nil {
+		log.Printf("WARNING: Connect tracing is disabled: %v", err)
+	} else {
+		interceptors = append(interceptors, traceInterceptor)
+	}
 	if limiter != nil {
 		interceptors = append(interceptors, grpcconnect.RateLimitInterceptor(limiter))
 	}
