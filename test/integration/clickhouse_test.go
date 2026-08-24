@@ -3,7 +3,9 @@
 package integration
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +30,89 @@ func TestClickHouse(t *testing.T) {
 
 	t.Run("ResultStore", func(t *testing.T) { testClickHouseResultStore(t, dsn) })
 	t.Run("GarbageCollectionRemovesRows", func(t *testing.T) { testClickHouseGC(t, dsn) })
+	t.Run("QueryEngine", func(t *testing.T) { testClickHouseQueryEngine(t, dsn) })
+}
+
+// chSourceTable is what the query-engine test reads from. It is a table of its
+// own rather than chTable: the same server plays both roles here, results
+// store and query target, and the two must not read each other's rows.
+const chSourceTable = "dbbridge_source"
+
+// testClickHouseQueryEngine runs a query through the ClickHouse *driver* - the
+// engine side of ClickHouse, which the tests above never touch because they
+// point `databases` at PostgreSQL and only use ClickHouse to store results.
+// Storage stays on the filesystem here for the same reason, so a failure lands
+// on the driver rather than on the store.
+func testClickHouseQueryEngine(t *testing.T, chDSN string) {
+	redisAddr := startRedis(t)
+	seedClickHouse(t, chDSN,
+		"CREATE TABLE IF NOT EXISTS "+chSourceTable+" (id Int32, name String) ENGINE = Memory",
+		"TRUNCATE TABLE "+chSourceTable,
+		"INSERT INTO "+chSourceTable+" VALUES (1, 'alice'), (2, 'bob')",
+	)
+
+	h := newHarness(t, harnessOptions{
+		instanceID: "node-ch-engine",
+		redisAddr:  redisAddr,
+		databases:  chDatabases(chDSN),
+	})
+	baseURL := newRESTServer(t, h)
+
+	rec := restDecode(t, restPost(t, baseURL+"/v1/queries",
+		`{"database_id":"ch","sql":"SELECT id, name FROM `+chSourceTable+` ORDER BY id","options":{"mode":"sync"}}`))
+	if rec.State != "SUCCEEDED" {
+		t.Fatalf("state = %s, want SUCCEEDED", rec.State)
+	}
+	if rec.Result == nil || rec.Result.RowCount != 2 {
+		t.Fatalf("result = %+v, want 2 rows", rec.Result)
+	}
+
+	resp, err := http.Get(baseURL + "/v1/queries/" + rec.ID + "/result")
+	if err != nil {
+		t.Fatalf("GET result: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d JSONL lines, want 2: %q", len(lines), body)
+	}
+	// The keys come from the driver's RowStream.Columns and the values from its
+	// Scan into an untyped destination, so both are checked here.
+	for i, want := range []string{"alice", "bob"} {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(lines[i]), &row); err != nil {
+			t.Fatalf("parse JSONL %q: %v", lines[i], err)
+		}
+		if _, ok := row["id"]; !ok {
+			t.Errorf("row %d = %q, want an id column", i, lines[i])
+		}
+		if row["name"] != want {
+			t.Errorf("row %d name = %v, want %s", i, row["name"], want)
+		}
+	}
+}
+
+// seedClickHouse creates and fills a table over database/sql rather than
+// through db.Pool the way seed() does: the driver's Exec is the query path,
+// and clickhouse-go wants DDL and INSERT on ExecContext.
+func seedClickHouse(t *testing.T, dsn string, statements ...string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	conn, err := sql.Open("clickhouse", dsn)
+	if err != nil {
+		t.Fatalf("open clickhouse for seeding: %v", err)
+	}
+	defer conn.Close()
+
+	for _, stmt := range statements {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("seed clickhouse with %q: %v", stmt, err)
+		}
+	}
 }
 
 // testClickHouseResultStore covers the backend end to end: a query writes its
