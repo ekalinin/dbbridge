@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ekalinin/dbbridge/internal/core/domain"
+	"github.com/ekalinin/dbbridge/internal/db"
 	"github.com/ekalinin/dbbridge/internal/state"
 	"github.com/ekalinin/dbbridge/internal/storage/backends/s3"
 )
@@ -100,6 +101,56 @@ func TestPostgres_EndToEnd(t *testing.T) {
 	rows := readResult(t, h, rec.ID)
 	if len(rows) != 2 || rows[0]["name"] != "alice" || rows[1]["name"] != "bob" {
 		t.Errorf("rows = %+v, want alice and bob", rows)
+	}
+}
+
+// TestPostgres_PoolStat checks the mapping of pgxpool's own counters onto
+// db.PoolStat, which is what /metrics and the admin can-stop check read. It
+// needs a server: with nothing ever dialed every counter reads zero, and a
+// swapped Idle/InUse looks exactly like a correct one.
+func TestPostgres_PoolStat(t *testing.T) {
+	ctx := context.Background()
+	dsn := startPostgres(t)
+
+	pool, err := db.OpenPool(ctx, "postgres", dsn, 4)
+	if err != nil {
+		t.Fatalf("OpenPool: %v", err)
+	}
+	defer func() {
+		if err := pool.Close(); err != nil {
+			t.Errorf("close pool: %v", err)
+		}
+	}()
+
+	// Ping is what puts the first connection in the pool; it hands it straight
+	// back, so it ends up idle.
+	if err := pool.Ping(ctx); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	assertPoolStat(t, pool.Stat(), "after a ping", 1, 0)
+
+	// A row stream holds its connection until it is closed.
+	rows, err := pool.Exec(ctx, "SELECT id, name FROM users ORDER BY id")
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	assertPoolStat(t, pool.Stat(), "while a result set is open", 0, 1)
+
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close rows: %v", err)
+	}
+	assertPoolStat(t, pool.Stat(), "after the result set was closed", 1, 0)
+}
+
+// assertPoolStat checks the idle and in-use counters, plus the invariant that
+// the open count covers both.
+func assertPoolStat(t *testing.T, got db.PoolStat, when string, idle, inUse int32) {
+	t.Helper()
+	if got.Idle != idle || got.InUse != inUse {
+		t.Errorf("Stat %s = %+v, want idle %d and in use %d", when, got, idle, inUse)
+	}
+	if got.Open != got.Idle+got.InUse {
+		t.Errorf("Stat %s = %+v, want open to be the idle and in-use connections together", when, got)
 	}
 }
 

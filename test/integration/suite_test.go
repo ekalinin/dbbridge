@@ -32,6 +32,7 @@ import (
 	"github.com/ekalinin/dbbridge/internal/storage/backends/s3"
 	"github.com/ekalinin/dbbridge/internal/transport/rest"
 
+	_ "github.com/ekalinin/dbbridge/internal/db/drivers/clickhouse"
 	_ "github.com/ekalinin/dbbridge/internal/db/drivers/mysql"
 	_ "github.com/ekalinin/dbbridge/internal/db/drivers/postgres"
 
@@ -534,4 +535,10 @@ func pgDatabases(dsn string) string {
 // mysqlDatabases is the databases section for a MySQL target.
 func mysqlDatabases(dsn string) string {
 	return fmt.Sprintf("  - id: my\n    engine: mysql\n    dsn: %q\n    max_conns: 4\n", dsn)
+}
+
+// chDatabases is the databases section for a ClickHouse target - the engine
+// side of ClickHouse, as opposed to chStorageSection's result store.
+func chDatabases(dsn string) string {
+	return fmt.Sprintf("  - id: ch\n    engine: clickhouse\n    dsn: %q\n    max_conns: 4\n", dsn)
 }
