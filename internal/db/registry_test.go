@@ -29,7 +29,7 @@ type constDriver struct{}
 func (constDriver) Open(context.Context, string, int) (Pool, error) { return stubPool{}, nil }
 
 // stubPool is comparable on purpose: a test asserts that OpenPool hands back
-// exactly the pool its driver returned.
+// exactly the pool its driver returned, once the tracing wrapper is off it.
 type stubPool struct{}
 
 func (stubPool) Exec(context.Context, string) (RowStream, error) { return nil, nil }
@@ -46,7 +46,7 @@ func TestOpenPoolUsesTheRegisteredDriver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenPool: %v", err)
 	}
-	if got != Pool(want) {
+	if Unwrap(got) != Pool(want) {
 		t.Errorf("OpenPool returned %#v, want the pool the driver produced", got)
 	}
 	if d.dsn != "stub://host/db" || d.maxConns != 7 {

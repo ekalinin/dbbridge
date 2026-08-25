@@ -8,10 +8,21 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// InitOTel with an empty endpoint must be a no-op and return a working shutdown.
+// InitOTel with an empty endpoint must export nothing and return a working
+// shutdown. The propagator is the exception: it is installed either way, so a
+// deployment that exports through a collector it configures elsewhere still
+// joins the caller's trace rather than starting a fresh one per request.
 func TestInitOTel_NoEndpointIsNoOp(t *testing.T) {
+	// A composite with nothing in it, so whatever extracts below is InitOTel's
+	// doing rather than a leftover from another test.
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
+
 	shutdown, err := InitOTel(context.Background(), "dbbridge-test", "")
 	if err != nil {
 		t.Fatalf("InitOTel: %v", err)
@@ -21,6 +32,13 @@ func TestInitOTel_NoEndpointIsNoOp(t *testing.T) {
 	}
 	if err := shutdown(context.Background()); err != nil {
 		t.Errorf("shutdown: %v", err)
+	}
+
+	header := http.Header{}
+	header.Set("traceparent", "00-0102030405060708090a0b0c0d0e0f10-1112131415161718-01")
+	ctx := otel.GetTextMapPropagator().Extract(context.Background(), propagation.HeaderCarrier(header))
+	if got := trace.SpanContextFromContext(ctx).SpanID().String(); got != "1112131415161718" {
+		t.Errorf("the global propagator extracted span id %q from a traceparent header, want 1112131415161718", got)
 	}
 }
 

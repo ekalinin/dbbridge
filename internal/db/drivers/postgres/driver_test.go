@@ -31,8 +31,10 @@ func TestDriverIsRegistered(t *testing.T) {
 		}
 	}()
 
-	if _, ok := pool.(*postgresPool); !ok {
-		t.Errorf("OpenPool returned %T, want this package's *postgresPool", pool)
+	// Through db.Unwrap: OpenPool hands back the pool wrapped for tracing, and
+	// what this test is about is which implementation the engine maps to.
+	if _, ok := db.Unwrap(pool).(*postgresPool); !ok {
+		t.Errorf("OpenPool returned %T, want this package's *postgresPool", db.Unwrap(pool))
 	}
 }
 

@@ -25,7 +25,6 @@ import (
 	"github.com/ekalinin/dbbridge/internal/telemetry"
 
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -671,7 +670,7 @@ func (qm *QueryManager) run(ctx context.Context, record *domain.QueryRecord, poo
 	if submitter.IsValid() {
 		spanOpts = append(spanOpts, trace.WithLinks(trace.Link{SpanContext: submitter}))
 	}
-	ctx, span := otel.Tracer("dbbridge").Start(ctx, "query.run", spanOpts...)
+	ctx, span := telemetry.Tracer().Start(ctx, "query.run", spanOpts...)
 	defer span.End()
 
 	startTime := time.Now()
