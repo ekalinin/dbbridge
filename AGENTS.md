@@ -73,7 +73,7 @@ dbbridge is a **stateless SQL proxy** that accepts queries over REST (including 
 
 ### Key design points
 
-- **Driver registration**: DB drivers (`postgres`, `mysql`, `clickhouse`, `oracle`) are registered at startup via blank imports in `cmd/dbbridge/main.go`. Storage backends (`fs`, `s3`, `clickhouse`) are built explicitly there from the sections the configuration asks for, so a backend that cannot be built is a startup failure rather than a 400 on the first query that needs it.
+- **Driver registration**: DB drivers (`postgres`, `mysql`, `clickhouse`, `oracle`) are registered at startup via blank imports in `cmd/dbbridge/main.go`. Storage backends (`fs`, `s3`, `clickhouse`) are built explicitly in `cmd/dbbridge/app.go` from the sections the configuration asks for, so a backend that cannot be built is a startup failure rather than a 400 on the first query that needs it.
 - **MetaStore duality**: `memory` metastore is for single-node dev; `redis` enables multi-node deployment with cross-instance query cancellation via Pub/Sub and lease heartbeats.
 - **Idempotency**: Pass `Idempotency-Key` HTTP header (or `options.idempotency_key` in gRPC) to deduplicate submissions within a result TTL window.
 - **Query modes**: `mode: "sync"` blocks until terminal state; `mode: "async"` (default) returns `202 Accepted` immediately.

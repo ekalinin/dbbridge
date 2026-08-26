@@ -302,7 +302,7 @@ and RPC metrics are turned off, so the metric set stays the one listed above.
 
 ```
 dbbridge/
-  cmd/dbbridge/main.go
+  cmd/dbbridge/{main.go, app.go, shutdown.go}
   api/proto/dbbridge/v1/dbbridge.proto
   api/openapi/dbbridge.yaml
   internal/authn/
