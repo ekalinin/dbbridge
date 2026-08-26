@@ -55,7 +55,7 @@ in-flight queries to reach zero — those finish in the background.
 
 The instance enters `DRAINING` when the process receives **`SIGTERM` or `SIGINT`**
 (graceful shutdown). `SIGHUP` reloads config and does **not** drain. See the
-signal handler in `cmd/dbbridge/main.go`.
+signal handler in `cmd/dbbridge/shutdown.go`.
 
 In practice `SIGTERM` is sent by Kubernetes on pod termination (rollout,
 scale-down, eviction), by `docker stop`, or by the orchestrator during a
