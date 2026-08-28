@@ -82,19 +82,25 @@ func TestResult_UnknownFormatIsRejected(t *testing.T) {
 }
 
 // TestResult_FormatTheBackendCannotHoldIsRejected: the line-oriented store
-// splits the stream on newlines, which is byte-exact for JSONL and CSV and
-// destroys a parquet file. The pair is checked at submission time rather than
-// after a query has already run.
+// splits the stream on newlines and joins it back the same way, which only JSONL
+// survives byte for byte: parquet is binary, and a CSV field containing a line
+// break is written literally between quotes, where bufio.ScanLines drops the CR
+// of a \r\n. The pair is checked at submission time rather than after a query
+// has already run and left a result its own checksum no longer matches.
 func TestResult_FormatTheBackendCannotHoldIsRejected(t *testing.T) {
 	h := newHarness(t)
 
-	rejected := postJSON(t, h.baseURL+"/v1/queries", startQueryPayload{
-		DatabaseID: "testdb",
-		SQL:        "SELECT 1",
-		Options:    map[string]any{"mode": "sync", "result_format": "parquet", "storage_backend": "clickhouse"},
-	})
-	defer rejected.Body.Close()
-	assertStatus(t, rejected, http.StatusBadRequest)
+	for _, format := range []string{"parquet", "csv"} {
+		t.Run(format+" is rejected", func(t *testing.T) {
+			rejected := postJSON(t, h.baseURL+"/v1/queries", startQueryPayload{
+				DatabaseID: "testdb",
+				SQL:        "SELECT 1",
+				Options:    map[string]any{"mode": "sync", "result_format": format, "storage_backend": "clickhouse"},
+			})
+			defer rejected.Body.Close()
+			assertStatus(t, rejected, http.StatusBadRequest)
+		})
+	}
 
 	accepted := postJSON(t, h.baseURL+"/v1/queries", startQueryPayload{
 		DatabaseID: "testdb",

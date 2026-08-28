@@ -164,40 +164,22 @@ func testClickHouseResultStore(t *testing.T, chDSN string) {
 		}
 	})
 
-	t.Run("csv round trip", func(t *testing.T) {
-		rec := restDecode(t, restPost(t, baseURL+"/v1/queries",
-			`{"database_id":"pg","sql":"SELECT id, name FROM people ORDER BY id","options":{"mode":"sync","result_format":"csv"}}`))
-		if rec.State != "SUCCEEDED" {
-			t.Fatalf("state = %s, want SUCCEEDED", rec.State)
-		}
-
-		resp, err := http.Get(baseURL + "/v1/queries/" + rec.ID + "/result")
-		if err != nil {
-			t.Fatalf("GET result: %v", err)
-		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-
-		lines := strings.Split(strings.TrimSpace(string(body)), "\n")
-		if len(lines) != 3 {
-			t.Fatalf("got %d CSV lines, want header + 2 rows: %q", len(lines), body)
-		}
-		if lines[0] != "id,name" {
-			t.Errorf("CSV header = %q, want id,name", lines[0])
-		}
-	})
-
-	// The store joins rows back with "\n", which is byte-exact for the
-	// line-oriented formats and destroys a parquet file: it came back one byte
-	// longer with its PAR1 footer read as "AR1\n".
-	t.Run("parquet is refused", func(t *testing.T) {
-		resp := restPost(t, baseURL+"/v1/queries",
-			`{"database_id":"pg","sql":"SELECT id FROM people","options":{"mode":"sync","result_format":"parquet"}}`)
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400", resp.StatusCode)
-		}
-	})
+	// The store splits the stream on "\n" and joins it back the same way, so
+	// only JSONL survives byte for byte. Parquet is binary and came back one
+	// byte longer with its PAR1 footer read as "AR1\n"; CSV quotes a field
+	// containing a line break and writes it literally, and bufio.ScanLines drops
+	// the CR of a \r\n inside those quotes. Both are refused at submission
+	// time rather than producing a result whose checksum no longer matches (I4).
+	for _, format := range []string{"parquet", "csv"} {
+		t.Run(format+" is refused", func(t *testing.T) {
+			resp := restPost(t, baseURL+"/v1/queries",
+				fmt.Sprintf(`{"database_id":"pg","sql":"SELECT id FROM people","options":{"mode":"sync","result_format":%q}}`, format))
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+		})
+	}
 }
 
 // testClickHouseGC: expiry has to reach the backend, not just the metadata, or
