@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -10,8 +14,12 @@ import (
 	"testing"
 	"time"
 
+	v1 "github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1"
+	"github.com/ekalinin/dbbridge/internal/gen/dbbridge/v1/dbbridgev1connect"
 	"github.com/ekalinin/dbbridge/internal/lifecycle"
 	"github.com/ekalinin/dbbridge/internal/state"
+
+	"connectrpc.com/connect"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -76,6 +84,16 @@ storage:
 	if got := closeStepNames(a); !slices.Equal(got, want) {
 		t.Errorf("cleanup order = %v, want %v", got, want)
 	}
+
+	// Every configured listener actually binds and serves its own handler. The
+	// addresses are ":0" in the config, so the ones srv.Addr holds after serve()
+	// are what the kernel assigned.
+	if err := a.serve(); err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	assertServes(t, "REST", "http://"+a.restHTTP.Addr+"/healthz")
+	assertServes(t, "admin", "http://"+a.adminHTTP.Addr+"/metrics")
+	assertConnectServes(t, "http://"+a.grpcHTTP.Addr)
 
 	// The signal loop, driven by real signals: SIGHUP reloads and keeps serving,
 	// SIGTERM runs the drain and returns. Registering a guard channel first is
@@ -198,4 +216,59 @@ func TestApp_CloseSkipsWhatWasNeverBuilt(t *testing.T) {
 		t.Fatalf("cleanup order = %v, want %v", got, want)
 	}
 	a.Close()
+}
+
+// assertServes checks that a listener answers 200 on a plain GET.
+func assertServes(t *testing.T, name, url string) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s (%s listener): %v", url, name, err)
+	}
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatalf("read %s body: %v", name, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("%s listener: GET %s = %d, want 200", name, url, resp.StatusCode)
+	}
+}
+
+// assertConnectServes checks that the gRPC listener is serving the Connect
+// handler over cleartext HTTP/2, which is what it falls back to without TLS.
+func assertConnectServes(t *testing.T, baseURL string) {
+	t.Helper()
+	tr := &http.Transport{}
+	tr.Protocols = new(http.Protocols)
+	tr.Protocols.SetUnencryptedHTTP2(true)
+	client := dbbridgev1connect.NewQueryServiceClient(&http.Client{Transport: tr}, baseURL)
+
+	resp, err := client.CanIBeStopped(context.Background(), connect.NewRequest(&v1.CanIBeStoppedRequest{}))
+	if err != nil {
+		t.Fatalf("CanIBeStopped over the gRPC listener: %v", err)
+	}
+	if !resp.Msg.CanBeStopped {
+		t.Errorf("can_be_stopped = false on an idle instance, want true")
+	}
+}
+
+// TestServeOne_ReportsABindFailure covers the synchronous bind. A port already
+// in use used to surface from inside the serving goroutine, where log.Fatalf
+// takes the process down without running Close - the same failure mode
+// loadTLSCerts was moved out of the goroutine to avoid.
+func TestServeOne_ReportsABindFailure(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer busy.Close()
+
+	a := &app{}
+	err = a.serveOne("REST API", &http.Server{Addr: busy.Addr().String(), ReadHeaderTimeout: time.Second})
+	if err == nil {
+		t.Fatal("serveOne accepted an address that is already in use")
+	}
+	if !strings.Contains(err.Error(), "REST API") {
+		t.Errorf("error = %v, want it to name the listener", err)
+	}
 }
