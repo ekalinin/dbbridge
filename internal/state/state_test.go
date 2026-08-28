@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -197,5 +198,52 @@ func TestMemoryMetaStoreTryLock(t *testing.T) {
 	}
 	if ok, err := ms.TryLock(ctx, "gc", time.Minute); err != nil || ok {
 		t.Fatalf("second TryLock = (%v, %v), want (false, nil)", ok, err)
+	}
+}
+
+// TestMemoryMetaStoreDoesNotPersistTheLeaseDeadline pins §4: LeaseDeadline is
+// derived from the owner's lease, not stored in the record. Writing back a
+// record that was read while a lease was live used to persist that deadline, so
+// a later read with no lease at all handed out a stale one - which is exactly
+// what the owner reaper and the GC sweep do, since both read a record and write
+// it back.
+func TestMemoryMetaStoreDoesNotPersistTheLeaseDeadline(t *testing.T) {
+	ctx := context.Background()
+	ms := NewMemoryMetaStore()
+	t.Cleanup(func() { ms.Close() })
+
+	rec := &domain.QueryRecord{
+		ID: "q1", DatabaseID: "db1", State: domain.StateRunning,
+		OwnerInstanceID: "inst-1", CreatedAt: time.Now(),
+	}
+	if err := ms.PutQuery(ctx, rec); err != nil {
+		t.Fatalf("PutQuery: %v", err)
+	}
+	if err := ms.Heartbeat(ctx, "inst-1", []string{"q1"}, time.Minute); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+
+	read, err := ms.GetQuery(ctx, "q1")
+	if err != nil {
+		t.Fatalf("GetQuery: %v", err)
+	}
+	if read.LeaseDeadline.IsZero() {
+		t.Fatal("LeaseDeadline is zero while a lease is live")
+	}
+
+	// The round trip the reaper and GC perform: read, change, write back.
+	read.State = domain.StateFailed
+	read.FinishedAt = time.Now()
+	if err := ms.UpdateQuery(ctx, read); err != nil {
+		t.Fatalf("UpdateQuery: %v", err)
+	}
+
+	// A terminal write drops the lease, so nothing should derive a deadline now.
+	again, err := ms.GetQuery(ctx, "q1")
+	if err != nil {
+		t.Fatalf("GetQuery after the write-back: %v", err)
+	}
+	if !again.LeaseDeadline.IsZero() {
+		t.Errorf("LeaseDeadline = %v after the lease was dropped, want zero: it was persisted into the record", again.LeaseDeadline)
 	}
 }

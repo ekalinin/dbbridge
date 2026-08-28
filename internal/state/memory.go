@@ -33,6 +33,11 @@ func NewMemoryMetaStore() *MemoryMetaStore {
 // does: a terminal record has no lease. Callers must hold the write lock.
 func (m *MemoryMetaStore) store(record *domain.QueryRecord) {
 	recCopy := *record
+	// Dropped for the same reason the redis store never marshals it: the
+	// deadline belongs to the lease, and a caller writing back a record it read
+	// would otherwise store a snapshot that GetQuery hands out once the lease is
+	// gone (spec §4).
+	recCopy.LeaseDeadline = time.Time{}
 	m.queries[record.ID] = &recCopy
 	if record.State.IsTerminal() {
 		delete(m.leases, record.ID)
