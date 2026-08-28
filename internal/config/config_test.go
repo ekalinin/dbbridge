@@ -368,3 +368,41 @@ instance:
 		t.Errorf("gc_interval = %v, want 250ms", got)
 	}
 }
+
+// TestShippedConfigsLoad covers the files an operator actually copies. Nothing
+// loaded them, so a key renamed in the loader - or a duration written as a bare
+// 0, which time.Duration does not accept - would only surface the first time
+// somebody started the process with one of them.
+//
+// The deploy configs read their secrets from the environment, which is the
+// point of ${VAR}: an unset variable is a load error, so the test sets them.
+func TestShippedConfigsLoad(t *testing.T) {
+	root := filepath.Join("..", "..")
+	for _, name := range []string{
+		"configs/dbbridge.yaml",
+		"deploy/configs/dbbridge-blue.yaml",
+		"deploy/configs/dbbridge-green.yaml",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(root, name)
+			if _, err := os.Stat(path); err != nil {
+				t.Skipf("%s is not present: %v", name, err)
+			}
+			t.Setenv("REDIS_PASSWORD", "test-password")
+			t.Setenv("S3_ACCESS_KEY_ID", "test-key")
+			t.Setenv("S3_SECRET_ACCESS_KEY", "test-secret")
+
+			m, err := NewManager(path)
+			if err != nil {
+				t.Fatalf("%s does not load: %v", name, err)
+			}
+			cfg := m.Get()
+			if cfg.Instance.ID == "" {
+				t.Errorf("%s loaded without an instance id", name)
+			}
+			if len(cfg.Databases) == 0 {
+				t.Errorf("%s loaded with no databases", name)
+			}
+		})
+	}
+}
