@@ -1,13 +1,18 @@
 package certs
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -126,5 +131,117 @@ func TestNewReloader_FailsOnAMissingFile(t *testing.T) {
 	}
 	if _, err := NewReloader(certPath, keyPath+".nope"); err == nil {
 		t.Error("a missing key path was accepted")
+	}
+}
+
+// serveTLS starts an HTTPS listener that takes its certificate from r, and
+// returns its base URL.
+func serveTLS(t *testing.T, r *Reloader, h http.Handler) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &http.Server{Handler: h, TLSConfig: r.TLSConfig(), ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		// The paths are empty exactly as in serveOne: the pair comes from
+		// TLSConfig.GetCertificate, not from the file arguments.
+		_ = srv.ServeTLS(ln, "", "")
+	}()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+	return "https://" + ln.Addr().String()
+}
+
+// tlsGet performs one HTTPS request and reports the common name the server
+// presented. The certificates here carry no SANs, so verification is skipped and
+// the identity is read off the peer chain instead - which is what the test is
+// actually asserting.
+func tlsGet(t *testing.T, url string) (int, string) {
+	t.Helper()
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // self-signed pair, identity is asserted below
+		DisableKeepAlives: true,
+	}}
+	defer client.CloseIdleConnections()
+
+	resp, err := client.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
+		t.Fatal("the response carried no peer certificate")
+	}
+	return resp.StatusCode, resp.TLS.PeerCertificates[0].Subject.CommonName
+}
+
+// TestReloader_ServesOverTLS covers what §9 Transport promises and no test
+// reached: TLSConfig() actually driving a listener. Every other test in this
+// file calls getCertificate directly, so the config the listeners are built
+// from - and the handshake it has to satisfy - was never exercised.
+func TestReloader_ServesOverTLS(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := writePair(t, dir, "first")
+
+	r, err := NewReloader(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("NewReloader: %v", err)
+	}
+
+	url := serveTLS(t, r, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	status, name := tlsGet(t, url)
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if name != "first" {
+		t.Errorf("served common name = %q, want first", name)
+	}
+}
+
+// TestReloader_ServesARotatedPairWithoutARestart is the property a renewal
+// depends on: the same running listener starts presenting the new certificate.
+// The unit test above it proves the Reloader notices the rotation; this one
+// proves a live TLS handshake does.
+func TestReloader_ServesARotatedPairWithoutARestart(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := writePair(t, dir, "first")
+
+	r, err := NewReloader(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("NewReloader: %v", err)
+	}
+	url := serveTLS(t, r, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	if _, name := tlsGet(t, url); name != "first" {
+		t.Fatalf("served common name = %q, want first", name)
+	}
+
+	// cert-manager rewrites the Secret; the mtime moves with it.
+	writePair(t, dir, "second")
+	future := time.Now().Add(time.Minute)
+	for _, p := range []string{certPath, keyPath} {
+		if err := os.Chtimes(p, future, future); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+	}
+
+	status, name := tlsGet(t, url)
+	if status != http.StatusOK {
+		t.Errorf("status after rotation = %d, want 200", status)
+	}
+	if name != "second" {
+		t.Errorf("served common name after rotation = %q, want second; the listener is still holding the old pair", name)
 	}
 }

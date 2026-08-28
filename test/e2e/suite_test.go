@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,6 +46,7 @@ func TestMain(m *testing.M) {
 	db.Register("postgres", fakeDriver{})
 	db.Register("mysql", slowDriver{})
 	db.Register("clickhouse", failToExecDriver{})
+	db.Register("oracle", gateDriver{})
 
 	tmpDir, err := os.MkdirTemp("", "dbbridge-e2e-results-*")
 	if err != nil {
@@ -82,6 +85,9 @@ type harnessOptions struct {
 	gcInterval time.Duration
 	// resultTTL is the default result lifetime; 0 means one hour.
 	resultTTL time.Duration
+	// maxRequestBytes caps a request body on both transports; 0 keeps the
+	// server default.
+	maxRequestBytes int64
 }
 
 // testHarness wraps the in-process servers and the wiring behind them. Each
@@ -144,6 +150,11 @@ databases:
     dsn: "clickhouse://fake:fake@localhost/fake"
     display_name: "Failing DB"
     max_conns: 2
+  - id: gatedb
+    engine: oracle
+    dsn: "oracle://fake:fake@localhost/fake"
+    display_name: "Gated DB"
+    max_conns: 2
 `, opts.gcInterval, opts.resultTTL, opts.allowWrites, globalResultsDir)
 
 	cfgFile, err := os.CreateTemp(t.TempDir(), "dbbridge-*.yaml")
@@ -184,13 +195,17 @@ databases:
 
 	limiter := ratelimit.New(opts.rps, opts.burst)
 
-	srv := rest.NewServer(svc, rest.Options{Auth: auth, RateLimit: limiter})
+	srv := rest.NewServer(svc, rest.Options{
+		Auth:            auth,
+		RateLimit:       limiter,
+		MaxRequestBytes: opts.maxRequestBytes,
+	})
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 
 	return &testHarness{
 		baseURL: hs.URL,
-		grpcURL: newConnectServer(t, svc, auth, limiter),
+		grpcURL: newConnectServer(t, svc, auth, limiter, opts.maxRequestBytes),
 		svc:     svc,
 		qm:      qm,
 		lm:      lm,
@@ -198,8 +213,9 @@ databases:
 }
 
 // newConnectServer mounts the Connect handler the same way main.go does:
-// cleartext HTTP/2, with the rate-limit interceptor ahead of the auth one.
-func newConnectServer(t *testing.T, svc *service.QueryService, auth *authn.Authenticator, limiter *ratelimit.Limiter) string {
+// cleartext HTTP/2, the body cap, and the rate-limit interceptor ahead of the
+// auth one.
+func newConnectServer(t *testing.T, svc *service.QueryService, auth *authn.Authenticator, limiter *ratelimit.Limiter, maxRequestBytes int64) string {
 	t.Helper()
 
 	var interceptors []connect.Interceptor
@@ -210,6 +226,9 @@ func newConnectServer(t *testing.T, svc *service.QueryService, auth *authn.Authe
 		interceptors = append(interceptors, grpcconnect.NewAuthInterceptor(auth))
 	}
 	var connectOpts []connect.HandlerOption
+	if maxRequestBytes > 0 {
+		connectOpts = append(connectOpts, connect.WithReadMaxBytes(int(maxRequestBytes)))
+	}
 	if len(interceptors) > 0 {
 		connectOpts = append(connectOpts, connect.WithInterceptors(interceptors...))
 	}
@@ -390,6 +409,82 @@ func (failToExecPool) Ping(_ context.Context) error { return nil }
 func (failToExecPool) Stat() db.PoolStat            { return db.PoolStat{} }
 func (failToExecPool) Close() error                 { return nil }
 
+// gateDriver backs the "gatedb" database. Its Exec parks until a test releases
+// the gate, which is what lets a test outlive the submitting request: the
+// query is still inside the driver long after the handler has returned and
+// net/http has canceled the request context (I1).
+//
+// With no gate armed it behaves exactly like fakeDriver, so the extra database
+// in the shared harness config is inert for every other test.
+type gateDriver struct{}
+
+func (gateDriver) Open(_ context.Context, _ string, _ int) (db.Pool, error) {
+	return gatePool{}, nil
+}
+
+type gatePool struct{}
+
+func (gatePool) Exec(ctx context.Context, sql string) (db.RowStream, error) {
+	g := armedGate.Load()
+	if g == nil {
+		return fakePool{}.Exec(ctx, sql)
+	}
+	g.enter()
+	select {
+	case <-g.release:
+		return fakePool{}.Exec(ctx, sql)
+	case <-ctx.Done():
+		// The execution context, not the request's: reaching this branch while a
+		// test is still holding the gate is the I1 failure the tests look for.
+		return nil, ctx.Err()
+	}
+}
+
+func (gatePool) Ping(_ context.Context) error { return nil }
+func (gatePool) Stat() db.PoolStat            { return db.PoolStat{} }
+func (gatePool) Close() error                 { return nil }
+
+// armedGate is the gate the current test installed. Package-level because the
+// driver registry is: e2e tests do not run in parallel, and armGate clears it
+// on cleanup.
+var armedGate atomic.Pointer[execGate]
+
+// execGate holds a query inside the driver until a test lets it go.
+type execGate struct {
+	entered   chan struct{}
+	release   chan struct{}
+	enterOnce sync.Once
+	relOnce   sync.Once
+}
+
+// armGate installs a gate for the duration of one test. The gate is released on
+// cleanup whether or not the test got that far, so a failing assertion cannot
+// leave a query goroutine parked for the rest of the binary.
+func armGate(t *testing.T) *execGate {
+	t.Helper()
+	g := &execGate{entered: make(chan struct{}), release: make(chan struct{})}
+	armedGate.Store(g)
+	t.Cleanup(func() {
+		armedGate.Store(nil)
+		g.Release()
+	})
+	return g
+}
+
+func (g *execGate) enter()   { g.enterOnce.Do(func() { close(g.entered) }) }
+func (g *execGate) Release() { g.relOnce.Do(func() { close(g.release) }) }
+
+// WaitEntered blocks until the query has actually reached the driver, so a test
+// never releases a gate nobody is waiting on.
+func (g *execGate) WaitEntered(t *testing.T) {
+	t.Helper()
+	select {
+	case <-g.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the query never reached the gated driver")
+	}
+}
+
 // lineStore is a stand-in for the ClickHouse ResultStore: it stores bytes
 // verbatim on the filesystem but declares the same format contract, so a
 // submission that asks for parquet on it is rejected before anything runs.
@@ -397,4 +492,4 @@ type lineStore struct {
 	storage.ResultStore
 }
 
-func (lineStore) SupportsFormat(format string) bool { return format == "jsonl" || format == "csv" }
+func (lineStore) SupportsFormat(format string) bool { return format == "jsonl" }

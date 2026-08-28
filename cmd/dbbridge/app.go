@@ -266,7 +266,12 @@ func (a *app) newGRPCServer() *http.Server {
 	if a.authenticator != nil {
 		interceptors = append(interceptors, grpcconnect.NewAuthInterceptor(a.authenticator))
 	}
-	var connectOpts []connect.HandlerOption
+	// The same body cap REST applies. Without it server.max_request_bytes bounded
+	// one transport out of two and the SQL text of a Connect submission was
+	// unbounded; connect answers ResourceExhausted where REST answers 413.
+	connectOpts := []connect.HandlerOption{
+		connect.WithReadMaxBytes(int(a.cfg.Server.MaxRequestBytes)),
+	}
 	if len(interceptors) > 0 {
 		connectOpts = append(connectOpts, connect.WithInterceptors(interceptors...))
 	}

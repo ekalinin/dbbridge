@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1223,17 +1224,78 @@ databases:
 type identDriver struct{ n atomic.Int64 }
 
 func (d *identDriver) Open(_ context.Context, _ string, _ int) (db.Pool, error) {
-	return &identPool{id: d.n.Add(1)}, nil
+	return &identPool{id: d.n.Add(1), closed: make(chan struct{})}, nil
 }
 
-type identPool struct{ id int64 }
+type identPool struct {
+	id        int64
+	closed    chan struct{}
+	closeOnce sync.Once
+}
 
-func (p *identPool) Exec(_ context.Context, _ string) (db.RowStream, error) {
+func (p *identPool) Exec(ctx context.Context, _ string) (db.RowStream, error) {
+	// Parked only while a test has armed the hold; every other test sees the
+	// original behaviour.
+	if h := identHold.Load(); h != nil {
+		h.enter()
+		select {
+		case <-h.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	return &fastStream{rows: [][]any{{p.id}}, pos: -1, cols: []string{"id"}}, nil
 }
 func (p *identPool) Ping(_ context.Context) error { return nil }
 func (p *identPool) Stat() db.PoolStat            { return db.PoolStat{} }
-func (p *identPool) Close() error                 { return nil }
+func (p *identPool) Close() error {
+	p.closeOnce.Do(func() { close(p.closed) })
+	return nil
+}
+
+// isClosed reports whether the pool has been closed yet.
+func (p *identPool) isClosed() bool {
+	select {
+	case <-p.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+// identHold parks identPool.Exec so a test can hold a query in flight against a
+// pool a reload is trying to retire.
+var identHold atomic.Pointer[execHold]
+
+type execHold struct {
+	entered   chan struct{}
+	release   chan struct{}
+	enterOnce sync.Once
+	relOnce   sync.Once
+}
+
+func armHold(t *testing.T) *execHold {
+	t.Helper()
+	h := &execHold{entered: make(chan struct{}), release: make(chan struct{})}
+	identHold.Store(h)
+	t.Cleanup(func() {
+		identHold.Store(nil)
+		h.Release()
+	})
+	return h
+}
+
+func (h *execHold) enter()   { h.enterOnce.Do(func() { close(h.entered) }) }
+func (h *execHold) Release() { h.relOnce.Do(func() { close(h.release) }) }
+
+func (h *execHold) WaitEntered(t *testing.T) {
+	t.Helper()
+	select {
+	case <-h.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the query never reached the pool")
+	}
+}
 
 // TestRun_ComputesChecksum: ResultRef.Checksum was always empty, so a download
 // could not be verified against what was written.
@@ -1596,5 +1658,241 @@ func TestControl_RemoteEventDoesNotCloseTheOwnersWatchers(t *testing.T) {
 	}
 	if cur.State != domain.StateRunning {
 		t.Errorf("state = %s, want RUNNING", cur.State)
+	}
+}
+
+// TestCollectGarbage_ReleasesTheIdempotencyKey covers the branch nothing used to
+// reach: GC removing a query that was submitted with an idempotency key.
+//
+// The key is namespaced by the caller's subject (scopedIdempotencyKey), so
+// deleting the record without releasing it left the key pointing at a query that
+// no longer exists - and squatting on it for the rest of its TTL. I3 only holds
+// for the retention window; past it the same key has to be usable again.
+func TestCollectGarbage_ReleasesTheIdempotencyKey(t *testing.T) {
+	qm, ms := newManager(t)
+	ctx := context.Background()
+
+	const (
+		queryID = "expired-with-key"
+		dbID    = "testdb"
+		rawKey  = "nightly-report"
+		subject = "alice"
+	)
+	scoped := scopedIdempotencyKey(subject, rawKey)
+
+	if _, acquired, err := ms.AcquireIdempotency(ctx, dbID, scoped, queryID, time.Hour); err != nil || !acquired {
+		t.Fatalf("AcquireIdempotency: acquired=%v err=%v", acquired, err)
+	}
+	if err := ms.PutQuery(ctx, &domain.QueryRecord{
+		ID:              queryID,
+		DatabaseID:      dbID,
+		State:           domain.StateSucceeded,
+		OwnerInstanceID: "test-instance",
+		CreatedAt:       time.Now().Add(-2 * time.Hour),
+		FinishedAt:      time.Now().Add(-1 * time.Hour),
+		Options:         domain.QueryOptions{ResultTTL: time.Minute, IdempotencyKey: rawKey},
+		IdempotencyKey:  rawKey,
+		Subject:         subject,
+	}); err != nil {
+		t.Fatalf("PutQuery: %v", err)
+	}
+
+	qm.collectGarbage()
+
+	if _, err := ms.GetQuery(ctx, queryID); err == nil {
+		t.Fatal("expected the expired record to be deleted")
+	}
+
+	existing, acquired, err := ms.AcquireIdempotency(ctx, dbID, scoped, "next-query", time.Hour)
+	if err != nil {
+		t.Fatalf("AcquireIdempotency after GC: %v", err)
+	}
+	if !acquired {
+		t.Fatalf("the idempotency key outlived the query GC deleted, still pointing at %q", existing)
+	}
+}
+
+// TestReload_RetiredPoolWaitsForItsQueries covers the half of §8 that
+// TestReload_RecreatesChangedPools leaves out: "a replaced or removed pool is
+// closed after the queries using it finish, not immediately".
+//
+// Closing on the spot would kill a query that was running perfectly well and had
+// nothing to do with the reload, and the failure would look like a database
+// error rather than an operator action.
+func TestReload_RetiredPoolWaitsForItsQueries(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "cfg.yaml")
+	write := func(maxConns int) {
+		body := fmt.Sprintf(`
+instance:
+  id: test-instance
+  metastore: memory
+  default_storage: fs
+  heartbeat_ttl: 200ms
+server:
+  rest_addr: ":0"
+  grpc_addr: ":0"
+defaults:
+  result_ttl: 1h
+storage:
+  fs:
+    root: %s
+databases:
+  - id: testdb
+    engine: clickhouse
+    dsn: "clickhouse://fake"
+    max_conns: %d
+`, resultsDir, maxConns)
+		if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+
+	write(2)
+	cfgMgr, err := config.NewManager(cfgPath)
+	if err != nil {
+		t.Fatalf("config.NewManager: %v", err)
+	}
+	ms := state.NewMemoryMetaStore()
+	t.Cleanup(func() { ms.Close() })
+
+	qm, err := NewQueryManager(cfgMgr, ms)
+	if err != nil {
+		t.Fatalf("NewQueryManager: %v", err)
+	}
+	t.Cleanup(func() { qm.Close() })
+
+	before, ok := qm.GetPool("testdb")
+	if !ok {
+		t.Fatal("no pool for testdb")
+	}
+	oldPool, ok := db.Unwrap(before).(*identPool)
+	if !ok {
+		t.Fatalf("pool is a %T, want *identPool", db.Unwrap(before))
+	}
+
+	// One query in flight against the pool the reload is about to replace.
+	hold := armHold(t)
+	rec, err := qm.SubmitQuery(context.Background(), "testdb", "SELECT 1", domain.QueryOptions{Mode: "async"})
+	if err != nil {
+		t.Fatalf("SubmitQuery: %v", err)
+	}
+	hold.WaitEntered(t)
+
+	write(8)
+	if _, err := qm.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	// The reload has swapped the pool in the registry already.
+	after, _ := qm.GetPool("testdb")
+	if db.Unwrap(after) == oldPool {
+		t.Fatal("the reload kept the old pool despite a changed max_conns")
+	}
+
+	// The retired pool must stay open while its query is still running. The
+	// drain loop ticks every 500ms, so this window is wide enough to catch an
+	// immediate close.
+	time.Sleep(time.Second)
+	if oldPool.isClosed() {
+		t.Fatal("the retired pool was closed while a query was still using it")
+	}
+
+	hold.Release()
+	pollState(t, qm, rec.ID, domain.StateSucceeded, 10*time.Second)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for !oldPool.isClosed() {
+		if time.Now().After(deadline) {
+			t.Fatal("the retired pool was never closed after its query finished")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestReload_RemovedPoolIsClosed covers the same drain for a database dropped
+// from the configuration entirely rather than replaced.
+func TestReload_RemovedPoolIsClosed(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "cfg.yaml")
+	write := func(databases string) {
+		body := fmt.Sprintf(`
+instance:
+  id: test-instance
+  metastore: memory
+  default_storage: fs
+  heartbeat_ttl: 200ms
+server:
+  rest_addr: ":0"
+  grpc_addr: ":0"
+defaults:
+  result_ttl: 1h
+storage:
+  fs:
+    root: %s
+databases:
+%s`, resultsDir, databases)
+		if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+
+	const both = `  - id: keepdb
+    engine: clickhouse
+    dsn: "clickhouse://keep"
+    max_conns: 2
+  - id: dropdb
+    engine: clickhouse
+    dsn: "clickhouse://drop"
+    max_conns: 2
+`
+	const onlyKeep = `  - id: keepdb
+    engine: clickhouse
+    dsn: "clickhouse://keep"
+    max_conns: 2
+`
+
+	write(both)
+	cfgMgr, err := config.NewManager(cfgPath)
+	if err != nil {
+		t.Fatalf("config.NewManager: %v", err)
+	}
+	ms := state.NewMemoryMetaStore()
+	t.Cleanup(func() { ms.Close() })
+
+	qm, err := NewQueryManager(cfgMgr, ms)
+	if err != nil {
+		t.Fatalf("NewQueryManager: %v", err)
+	}
+	t.Cleanup(func() { qm.Close() })
+
+	dropped, ok := qm.GetPool("dropdb")
+	if !ok {
+		t.Fatal("no pool for dropdb")
+	}
+	droppedPool := db.Unwrap(dropped).(*identPool)
+
+	write(onlyKeep)
+	report, err := qm.Reload()
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if !slices.Equal(report.Removed, []string{"dropdb"}) {
+		t.Fatalf("report.Removed = %v, want [dropdb]", report.Removed)
+	}
+	if _, ok := qm.GetPool("dropdb"); ok {
+		t.Error("the removed database is still serving from a pool")
+	}
+
+	// Nothing is in flight, so the drain loop closes it on its first check.
+	deadline := time.Now().Add(10 * time.Second)
+	for !droppedPool.isClosed() {
+		if time.Now().After(deadline) {
+			t.Fatal("the removed pool was never closed")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The database that stayed keeps its pool, and the same one.
+	if _, ok := qm.GetPool("keepdb"); !ok {
+		t.Error("the retained database lost its pool")
 	}
 }

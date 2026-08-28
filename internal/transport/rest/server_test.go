@@ -775,3 +775,78 @@ func (r *slowReader) Read(p []byte) (int, error) {
 }
 
 func (r *slowReader) Close() error { return nil }
+
+// getWithXFF issues a GET carrying a forged X-Forwarded-For value.
+func getWithXFF(t *testing.T, url, forwardedFor string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-Forwarded-For", forwardedFor)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	return resp
+}
+
+// TestREST_UntrustedForwardedForSharesOneBudget covers the default half of §9:
+// "X-Forwarded-For is only honoured for server.trusted_proxy_count hops; with
+// none configured the header is not trusted at all."
+//
+// The rate limiter is the observable, because it is the one thing keyed by
+// client address. With the header ignored, two requests claiming different
+// origins land in the same bucket and the second one is refused; if the header
+// were believed, a single caller could mint a fresh budget per request just by
+// changing a string it controls.
+func TestREST_UntrustedForwardedForSharesOneBudget(t *testing.T) {
+	svc, _ := testutil.NewService(t)
+	ts := httptest.NewServer(rest.NewServer(svc, rest.Options{
+		// Burst of one, refill effectively never: the second request through the
+		// same bucket has to be refused.
+		RateLimit: ratelimit.New(0.0001, 1),
+		// TrustedProxyCount deliberately left at zero.
+	}).Handler())
+	t.Cleanup(ts.Close)
+
+	first := getWithXFF(t, ts.URL+"/v1/databases", "198.51.100.1")
+	first.Body.Close()
+	second := getWithXFF(t, ts.URL+"/v1/databases", "198.51.100.2")
+	second.Body.Close()
+
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("first request: status = %d, want 200", first.StatusCode)
+	}
+	if second.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("second request from a different forged X-Forwarded-For: status = %d, want 429; "+
+			"the header is being trusted without server.trusted_proxy_count", second.StatusCode)
+	}
+}
+
+// TestREST_TrustedForwardedForSeparatesCallers is the other half: with a hop
+// count configured the header is authoritative, so callers behind the proxy get
+// budgets of their own instead of sharing the proxy's address.
+func TestREST_TrustedForwardedForSeparatesCallers(t *testing.T) {
+	svc, _ := testutil.NewService(t)
+	ts := httptest.NewServer(rest.NewServer(svc, rest.Options{
+		RateLimit:         ratelimit.New(0.0001, 1),
+		TrustedProxyCount: 1,
+	}).Handler())
+	t.Cleanup(ts.Close)
+
+	first := getWithXFF(t, ts.URL+"/v1/databases", "198.51.100.1")
+	first.Body.Close()
+	second := getWithXFF(t, ts.URL+"/v1/databases", "198.51.100.2")
+	second.Body.Close()
+	repeat := getWithXFF(t, ts.URL+"/v1/databases", "198.51.100.1")
+	repeat.Body.Close()
+
+	if first.StatusCode != http.StatusOK || second.StatusCode != http.StatusOK {
+		t.Errorf("two distinct clients behind one trusted proxy = %d, %d; want 200s",
+			first.StatusCode, second.StatusCode)
+	}
+	if repeat.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("second request from the same client = %d, want 429", repeat.StatusCode)
+	}
+}

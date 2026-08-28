@@ -428,11 +428,12 @@ func (r *RedisMetaStore) DeleteQuery(ctx context.Context, id string) error {
 	pipe.Del(ctx, queryKey(id))
 	pipe.Del(ctx, leaseKey(id))
 
+	// The idempotency key is not derived from the record: callers namespace it
+	// before handing it over, so QueryRecord.IdempotencyKey is the raw client
+	// value and rebuilding the stored key from it never matched. Releasing it is
+	// the caller's job, which is where the namespacing rule lives.
 	if err == nil {
 		pipe.SRem(ctx, instanceQueriesKey(rec.OwnerInstanceID), id)
-		if rec.IdempotencyKey != "" {
-			pipe.Del(ctx, idempotencyKey(rec.DatabaseID, rec.IdempotencyKey))
-		}
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil {

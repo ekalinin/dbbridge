@@ -284,14 +284,10 @@ func (m *MemoryMetaStore) DeleteQuery(ctx context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Clean up related idempotency keys if any
-	q, ok := m.queries[id]
-	if ok && q.IdempotencyKey != "" {
-		fullKey := q.DatabaseID + ":" + q.IdempotencyKey
-		delete(m.idempotency, fullKey)
-		delete(m.idempExpires, fullKey)
-	}
-
+	// The idempotency key is not derived from the record: callers namespace it
+	// before handing it over, so QueryRecord.IdempotencyKey is the raw client
+	// value and rebuilding the stored key from it never matched. Releasing it is
+	// the caller's job, which is where the namespacing rule lives.
 	delete(m.queries, id)
 	delete(m.leases, id)
 	return nil

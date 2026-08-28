@@ -52,13 +52,20 @@ func NewClickHouseResultStore(dsn, table string) (*ClickHouseResultStore, error)
 	}, nil
 }
 
-// SupportsFormat reports the line-oriented formats only. The store splits the
-// incoming stream with bufio.Scanner and joins the rows back with "\n", which
-// is byte-exact for JSONL and CSV and destroys a binary one: parquet came back
-// one byte longer, its "PAR1" footer read as "AR1\n", and any \r\n inside the
-// file lost a byte.
+// SupportsFormat reports JSONL only. The store splits the incoming stream with
+// bufio.Scanner and joins the rows back with "\n", so the round trip is exact
+// only for a format that cannot contain a bare carriage return or newline
+// outside a record separator.
+//
+// Parquet is binary: it came back one byte longer with its "PAR1" footer read
+// as "AR1\n". CSV is not safe either, which is less obvious - encoding/csv
+// quotes a field containing a line break and writes it literally, and
+// bufio.ScanLines drops the CR of a \r\n inside those quotes. A 19-byte file
+// came back as 18, so its recorded Checksum and SizeBytes no longer described
+// the bytes served (I4). JSONL escapes both characters inside the string, so it
+// survives.
 func (s *ClickHouseResultStore) SupportsFormat(format string) bool {
-	return format == "jsonl" || format == "csv"
+	return format == "jsonl"
 }
 
 type clickhousePipeWriter struct {

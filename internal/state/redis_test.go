@@ -1,6 +1,9 @@
 package state
 
 import (
+	"context"
+	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -260,5 +263,278 @@ func TestRedisTryLock(t *testing.T) {
 	ok, err = store.TryLock(ctx, "gc", 30*time.Second)
 	if err != nil || !ok {
 		t.Fatalf("TryLock after expiry = (%v, %v), want (true, nil)", ok, err)
+	}
+}
+
+// terminalRecord builds a finished query whose retention window has already
+// elapsed, which is what ListExpiredQueries looks for.
+func terminalRecord(id string, finishedAgo, ttl time.Duration) *domain.QueryRecord {
+	rec := runningRecord(id)
+	rec.State = domain.StateSucceeded
+	rec.FinishedAt = time.Now().Add(-finishedAgo)
+	rec.Options.ResultTTL = ttl
+	return rec
+}
+
+// TestRedisListByInstance covers the list recoverOrphans reads at startup: the
+// queries this instance still owns in the MetaStore but is no longer running.
+// A terminal query has to drop out of it, or a restarted node would report
+// itself busy for ever and never reach can_be_stopped=true (I5).
+func TestRedisListByInstance(t *testing.T) {
+	_, store := newRedisStore(t)
+	ctx := t.Context()
+
+	for _, rec := range []*domain.QueryRecord{runningRecord("own-1"), runningRecord("own-2")} {
+		if err := store.PutQuery(ctx, rec); err != nil {
+			t.Fatalf("PutQuery: %v", err)
+		}
+	}
+	other := runningRecord("other-1")
+	other.OwnerInstanceID = "inst-2"
+	if err := store.PutQuery(ctx, other); err != nil {
+		t.Fatalf("PutQuery: %v", err)
+	}
+
+	ids, err := store.ListByInstance(ctx, "inst-1")
+	if err != nil {
+		t.Fatalf("ListByInstance: %v", err)
+	}
+	slices.Sort(ids)
+	if !slices.Equal(ids, []string{"own-1", "own-2"}) {
+		t.Fatalf("ListByInstance = %v, want [own-1 own-2]", ids)
+	}
+
+	if n, err := store.CountInFlight(ctx, "inst-1"); err != nil || n != 2 {
+		t.Fatalf("CountInFlight = %d, %v; want 2, nil", n, err)
+	}
+
+	// Finishing one drops it from the owner's active set.
+	done := runningRecord("own-1")
+	done.State = domain.StateSucceeded
+	done.FinishedAt = time.Now()
+	if err := store.PutQuery(ctx, done); err != nil {
+		t.Fatalf("PutQuery terminal: %v", err)
+	}
+	ids, err = store.ListByInstance(ctx, "inst-1")
+	if err != nil {
+		t.Fatalf("ListByInstance after terminal: %v", err)
+	}
+	if !slices.Equal(ids, []string{"own-2"}) {
+		t.Fatalf("ListByInstance after terminal = %v, want [own-2]", ids)
+	}
+}
+
+// TestRedisListDatabasesSeen pins the behaviour that separates this store from
+// the in-memory one: the set is persistent, so a database keeps being reported
+// after the query that named it is gone. That is what lets ListDatabases surface
+// a database dropped from the config while its results are still downloadable.
+func TestRedisListDatabasesSeen(t *testing.T) {
+	_, store := newRedisStore(t)
+	ctx := t.Context()
+
+	first := runningRecord("q1")
+	second := runningRecord("q2")
+	second.DatabaseID = "db2"
+	for _, rec := range []*domain.QueryRecord{first, second} {
+		if err := store.PutQuery(ctx, rec); err != nil {
+			t.Fatalf("PutQuery: %v", err)
+		}
+	}
+
+	seen, err := store.ListDatabasesSeen(ctx)
+	if err != nil {
+		t.Fatalf("ListDatabasesSeen: %v", err)
+	}
+	slices.Sort(seen)
+	if !slices.Equal(seen, []string{"db1", "db2"}) {
+		t.Fatalf("ListDatabasesSeen = %v, want [db1 db2]", seen)
+	}
+
+	if err := store.DeleteQuery(ctx, "q2"); err != nil {
+		t.Fatalf("DeleteQuery: %v", err)
+	}
+	seen, err = store.ListDatabasesSeen(ctx)
+	if err != nil {
+		t.Fatalf("ListDatabasesSeen after delete: %v", err)
+	}
+	slices.Sort(seen)
+	if !slices.Equal(seen, []string{"db1", "db2"}) {
+		t.Fatalf("ListDatabasesSeen = %v after deleting the only db2 query, want it retained", seen)
+	}
+}
+
+// TestRedisListExpiredQueries covers the scan GC runs. Expiry is measured from
+// FinishedAt plus the record's own ResultTTL, so a running query and a recently
+// finished one both have to stay out of the result.
+func TestRedisListExpiredQueries(t *testing.T) {
+	_, store := newRedisStore(t)
+	ctx := t.Context()
+
+	records := []*domain.QueryRecord{
+		terminalRecord("gone", time.Hour, time.Minute),
+		terminalRecord("fresh", time.Minute, time.Hour),
+		runningRecord("live"),
+	}
+	// A terminal record with no FinishedAt cannot have its retention measured,
+	// so it must not be swept on a zero timestamp.
+	noFinish := runningRecord("no-finish")
+	noFinish.State = domain.StateFailed
+	records = append(records, noFinish)
+
+	for _, rec := range records {
+		if err := store.PutQuery(ctx, rec); err != nil {
+			t.Fatalf("PutQuery %s: %v", rec.ID, err)
+		}
+	}
+
+	expired, err := store.ListExpiredQueries(ctx)
+	if err != nil {
+		t.Fatalf("ListExpiredQueries: %v", err)
+	}
+	if !slices.Equal(expired, []string{"gone"}) {
+		t.Fatalf("ListExpiredQueries = %v, want [gone]", expired)
+	}
+}
+
+// TestRedisDeleteQuery covers the removal GC performs: the record, its lease and
+// its place in the owner's active set all go, and the query stops being readable.
+func TestRedisDeleteQuery(t *testing.T) {
+	mr, store := newRedisStore(t)
+	ctx := t.Context()
+
+	if err := store.PutQuery(ctx, runningRecord("q1")); err != nil {
+		t.Fatalf("PutQuery: %v", err)
+	}
+	if err := store.Heartbeat(ctx, "inst-1", []string{"q1"}, 5*time.Second); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+
+	if err := store.DeleteQuery(ctx, "q1"); err != nil {
+		t.Fatalf("DeleteQuery: %v", err)
+	}
+
+	if _, err := store.GetQuery(ctx, "q1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetQuery after delete: %v, want ErrNotFound", err)
+	}
+	if mr.Exists("dbbridge:lease:q1") {
+		t.Error("the lease key outlived the query it belonged to")
+	}
+	if n, err := store.CountInFlight(ctx, "inst-1"); err != nil || n != 0 {
+		t.Fatalf("CountInFlight = %d, %v; want 0, nil", n, err)
+	}
+
+	// Deleting a query that is already gone is what a second GC pass does; it
+	// must not fail.
+	if err := store.DeleteQuery(ctx, "q1"); err != nil {
+		t.Fatalf("DeleteQuery on a missing record: %v", err)
+	}
+}
+
+// TestRedisUpdateQuery covers the unconditional write GC uses to mark a record
+// EXPIRED. Unlike the memory store it does not require the record to exist,
+// which is worth pinning so a change to either implementation is deliberate.
+func TestRedisUpdateQuery(t *testing.T) {
+	_, store := newRedisStore(t)
+	ctx := t.Context()
+
+	if err := store.PutQuery(ctx, runningRecord("q1")); err != nil {
+		t.Fatalf("PutQuery: %v", err)
+	}
+	expired := runningRecord("q1")
+	expired.State = domain.StateExpired
+	expired.FinishedAt = time.Now()
+	if err := store.UpdateQuery(ctx, expired); err != nil {
+		t.Fatalf("UpdateQuery: %v", err)
+	}
+
+	got, err := store.GetQuery(ctx, "q1")
+	if err != nil {
+		t.Fatalf("GetQuery: %v", err)
+	}
+	if got.State != domain.StateExpired {
+		t.Fatalf("state = %s, want EXPIRED", got.State)
+	}
+}
+
+// TestRedisControlRoundTrip covers the Pub/Sub channel §5.5 builds cross-instance
+// stop and query events on. Without it a subscription opened through any
+// instance other than the owner never fires, which breaks I2 for WebSocket and
+// WatchQuery.
+func TestRedisControlRoundTrip(t *testing.T) {
+	_, store := newRedisStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ch, err := store.SubscribeControl(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeControl: %v", err)
+	}
+
+	sent := ControlMsg{
+		Type:     ControlQueryEvent,
+		QueryID:  "q1",
+		SenderID: "inst-2",
+		Event: &QueryEventPayload{
+			State: string(domain.StateSucceeded),
+			Stats: domain.QueryStats{RowsRead: 7, BytesWritten: 42},
+		},
+	}
+	// The subscription is established asynchronously by go-redis, so publish
+	// until one lands rather than racing a single send.
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := store.PublishControl(ctx, sent); err != nil {
+			t.Fatalf("PublishControl: %v", err)
+		}
+		select {
+		case got := <-ch:
+			if got.Type != sent.Type || got.QueryID != sent.QueryID || got.SenderID != sent.SenderID {
+				t.Fatalf("received %+v, want %+v", got, sent)
+			}
+			if got.Event == nil {
+				t.Fatal("the event payload did not survive the round trip")
+			}
+			if got.Event.State != sent.Event.State || got.Event.Stats.RowsRead != 7 {
+				t.Fatalf("event = %+v, want state=%s rows_read=7", got.Event, sent.Event.State)
+			}
+			return
+		case <-ticker.C:
+		case <-deadline:
+			t.Fatal("no control message arrived on the subscription")
+		}
+	}
+}
+
+// TestRedisSubscribeControlClosesOnContext keeps the subscription tied to its
+// context: controlWorker stops by cancelling, and a channel left open would keep
+// a goroutine and a Redis connection alive for the life of the process.
+func TestRedisSubscribeControlClosesOnContext(t *testing.T) {
+	_, store := newRedisStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+
+	ch, err := store.SubscribeControl(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeControl: %v", err)
+	}
+	cancel()
+
+	select {
+	case _, ok := <-ch:
+		if ok {
+			// A message queued before the cancel is fine; the close still has to
+			// follow it.
+			select {
+			case _, ok := <-ch:
+				if ok {
+					t.Fatal("the control channel kept delivering after its context was canceled")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the control channel was not closed after its context was canceled")
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the control channel was not closed after its context was canceled")
 	}
 }

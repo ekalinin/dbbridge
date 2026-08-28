@@ -154,11 +154,11 @@ func TestListDatabases(t *testing.T) {
 	}
 	decodeJSON(t, resp.Body, &dbs)
 
-	// The harness config carries three databases (testdb, slowdb, faildb) so
-	// later tests can reach the cancel and failure paths; testdb is the one
-	// this test cares about.
-	if len(dbs) != 3 {
-		t.Fatalf("expected 3 databases, got %d", len(dbs))
+	// The harness config carries four databases (testdb, slowdb, faildb,
+	// gatedb) so later tests can reach the cancel, failure and detached-execution
+	// paths; testdb is the one this test cares about.
+	if len(dbs) != 4 {
+		t.Fatalf("expected 4 databases, got %d", len(dbs))
 	}
 	found := false
 	for _, d := range dbs {

@@ -181,13 +181,15 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 func (s *Server) useCommonMiddleware(r chi.Router) {
 	r.Use(nameSpanAfterRoute)
 	r.Use(middleware.RequestID)
-	// Without a hop count chi takes the right-most X-Forwarded-For entry, which
-	// is only the real client when exactly one trusted proxy sits in front of
-	// the service; in any other topology the header is attacker-controlled.
+	// X-Forwarded-For is honoured only for the configured number of hops. With
+	// none configured no XFF middleware is installed at all, so the resolved
+	// client address stays the peer address and ratelimit.KeyOf falls back to
+	// RemoteAddr (spec §9: "with none configured the header is not trusted at
+	// all"). ClientIPFromXFF() used to run in that branch, which took the
+	// right-most entry unconditionally - a caller could then mint a fresh rate
+	// limit budget for every request by varying a header it controls.
 	if s.opts.TrustedProxyCount > 0 {
 		r.Use(middleware.ClientIPFromXFFTrustedProxies(s.opts.TrustedProxyCount))
-	} else {
-		r.Use(middleware.ClientIPFromXFF())
 	}
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
