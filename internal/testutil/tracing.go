@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -44,18 +45,38 @@ func RecordSpans(t *testing.T) *tracetest.SpanRecorder {
 	return recorder
 }
 
+// spanWait bounds how long SpanByName waits for a span to be exported.
+const spanWait = 10 * time.Second
+
 // SpanByName returns the single recorded span with that name. A query produces
 // each of its spans once, so more than one is a test that let two runs bleed
 // together rather than something to pick from.
+//
+// It waits for the span to appear rather than reading the recorder once. A span
+// is recorded when it ends, and the execution spans end after the caller has
+// been answered: a sync submission returns from the watcher notification inside
+// complete(), while query.run still has its deferred End to run. Reading
+// immediately made every assertion about those spans a race that only lost on a
+// slow machine - CI caught it under -race with db.exec and storage.write
+// recorded and their parent query.run not yet.
 func SpanByName(t *testing.T, recorder *tracetest.SpanRecorder, name string) sdktrace.ReadOnlySpan {
 	t.Helper()
 
 	var found []sdktrace.ReadOnlySpan
-	for _, span := range recorder.Ended() {
-		if span.Name() == name {
-			found = append(found, span)
+	deadline := time.Now().Add(spanWait)
+	for {
+		found = found[:0]
+		for _, span := range recorder.Ended() {
+			if span.Name() == name {
+				found = append(found, span)
+			}
 		}
+		if len(found) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+
 	switch len(found) {
 	case 1:
 		return found[0]
