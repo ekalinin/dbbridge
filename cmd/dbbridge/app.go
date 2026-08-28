@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -316,36 +318,63 @@ func (a *app) loadTLSCerts() error {
 	return nil
 }
 
-// serve starts every configured listener in its own goroutine.
-func (a *app) serve() {
-	a.serveOne("REST API", a.restHTTP)
-	a.serveOne("gRPC / Connect API", a.grpcHTTP)
-	if a.adminHTTP != nil {
-		a.serveOne("metrics / admin API", a.adminHTTP)
+// serve starts every configured listener. A listener that cannot bind is
+// returned as an error rather than taken as a reason to keep going.
+func (a *app) serve() error {
+	for _, l := range []struct {
+		name string
+		srv  *http.Server
+	}{
+		{"REST API", a.restHTTP},
+		{"gRPC / Connect API", a.grpcHTTP},
+		{"metrics / admin API", a.adminHTTP},
+	} {
+		if l.srv == nil {
+			continue
+		}
+		if err := a.serveOne(l.name, l.srv); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func (a *app) serveOne(name string, srv *http.Server) {
+// serveOne binds the listener and then serves it in the background.
+//
+// Binding is synchronous, like loadTLSCerts reading the key pair: a port
+// already in use used to surface from inside the goroutine, where log.Fatalf
+// skips the cleanup Close does and takes down a process whose other listeners,
+// MetaStore and pools are already up. It also leaves srv.Addr holding the
+// address that was actually bound, which is what a ":0" listener resolves to.
+func (a *app) serveOne(name string, srv *http.Server) error {
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return fmt.Errorf("failed to bind the %s to %s: %w", name, srv.Addr, err)
+	}
+	srv.Addr = ln.Addr().String()
+
+	scheme := "http"
+	if a.tlsCerts != nil {
+		scheme = "https"
+		srv.TLSConfig = a.tlsCerts.TLSConfig()
+	}
+	log.Printf("Starting %s on %s (%s)", name, srv.Addr, scheme)
+
 	go func() {
-		scheme := "http"
-		if a.tlsCerts != nil {
-			scheme = "https"
-			srv.TLSConfig = a.tlsCerts.TLSConfig()
-		}
-		log.Printf("Starting %s on %s (%s)", name, srv.Addr, scheme)
 		var err error
 		if a.tlsCerts != nil {
 			// The paths are empty on purpose: the certificate comes from
 			// TLSConfig.GetCertificate, which re-reads the files when they
 			// change, so a rotated certificate does not wait for a restart.
-			err = srv.ListenAndServeTLS("", "")
+			err = srv.ServeTLS(ln, "", "")
 		} else {
-			err = srv.ListenAndServe()
+			err = srv.Serve(ln)
 		}
-		if err != nil && err != http.ErrServerClosed {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("%s failed: %v", name, err)
 		}
 	}()
+	return nil
 }
 
 // closeStep is one entry of the cleanup order, named after what it releases so

@@ -24,7 +24,11 @@ func main() {
 		log.Fatal(err)
 	}
 
-	a.serve()
+	if err := a.serve(); err != nil {
+		a.Close()
+		log.Fatal(err)
+	}
+
 	a.awaitSignals()
 	a.Close()
 }
