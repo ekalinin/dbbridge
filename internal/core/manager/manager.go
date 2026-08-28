@@ -1366,6 +1366,18 @@ func (qm *QueryManager) collectQuery(ctx context.Context, id string) {
 		}
 	}
 
+	// The key is namespaced by the subject that chose it, and only this package
+	// knows that layout - a MetaStore is handed the finished key and never sees a
+	// subject. Releasing it here rather than inside DeleteQuery is what keeps the
+	// namespacing rule in one place; without it the key outlived the record it
+	// pointed at and squatted on the name for the rest of its TTL (I3).
+	if rec.IdempotencyKey != "" {
+		key := scopedIdempotencyKey(rec.Subject, rec.IdempotencyKey)
+		if err := qm.metaStore.ReleaseIdempotency(ctx, rec.DatabaseID, key, id); err != nil {
+			log.Printf("ERROR: GC failed to release the idempotency key for query %s: %v", id, err)
+		}
+	}
+
 	log.Printf("GC: Deleting metadata for expired query %s", id)
 	if err := qm.metaStore.DeleteQuery(ctx, id); err != nil {
 		log.Printf("ERROR: GC failed to delete metadata for query %s: %v", id, err)
