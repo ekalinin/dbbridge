@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -536,5 +537,35 @@ func TestRedisSubscribeControlClosesOnContext(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the control channel was not closed after its context was canceled")
+	}
+}
+
+// TestRedisDoesNotPersistTheLeaseDeadline is the redis half of §4: the record
+// stored in Redis must not carry a lease_deadline field at all, or a read with
+// no live lease would hand back the snapshot taken when there was one.
+func TestRedisDoesNotPersistTheLeaseDeadline(t *testing.T) {
+	mr, store := newRedisStore(t)
+	ctx := t.Context()
+
+	rec := runningRecord("q1")
+	rec.LeaseDeadline = time.Now().Add(time.Hour)
+	if err := store.PutQuery(ctx, rec); err != nil {
+		t.Fatalf("PutQuery: %v", err)
+	}
+
+	raw, err := mr.Get("dbbridge:query:q1")
+	if err != nil {
+		t.Fatalf("read the stored record: %v", err)
+	}
+	if strings.Contains(raw, "lease_deadline") {
+		t.Errorf("the stored record carries a lease deadline: %s", raw)
+	}
+
+	got, err := store.GetQuery(ctx, "q1")
+	if err != nil {
+		t.Fatalf("GetQuery: %v", err)
+	}
+	if !got.LeaseDeadline.IsZero() {
+		t.Errorf("LeaseDeadline = %v with no lease key, want zero", got.LeaseDeadline)
 	}
 }

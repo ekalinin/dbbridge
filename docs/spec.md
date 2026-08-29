@@ -49,10 +49,15 @@ stateDiagram-v2
   RUNNING --> FAILED
   RUNNING --> CANCELED
   PENDING --> CANCELED
+  PENDING --> FAILED
   SUCCEEDED --> EXPIRED
   FAILED --> EXPIRED
   CANCELED --> EXPIRED
 ```
+- `PENDING → FAILED` is reached without ever running: the storage backend can
+fail to open a writer, and the owner reaper fences on `{PENDING, RUNNING}`
+because a query whose owner died before `Pool.Exec` returned is as lost as one
+that died halfway through.
 - `RUNNING` includes streaming→persisting sub-phases (visible in stats).
 - `EXPIRED` — after `result_ttl` expires, a background GC cleans up storage + metadata.
 - If the owner dies (lease expires) and the query is in `RUNNING` — transition to `FAILED` (reason=`owner_lost`) in v1.
@@ -154,14 +159,14 @@ Any `${VAR}` in the file is substituted from the environment at load time, and a
 instance:
   id: dbbridge-blue
   metastore: redis   # redis | memory
-  redis: { addr: "redis:6379" }
+  redis_addr: "redis:6379"
   default_storage: s3
 server:
   rest_addr: ":8080"
   grpc_addr: ":9090"
 defaults:
   result_ttl: 24h
-  query_timeout: 0
+  query_timeout: 0s   # no limit; a bare 0 is not a duration
 storage:
   s3: { bucket: dbbridge, region: eu-central-1 }
   fs: { root: /var/lib/dbbridge/results }
@@ -170,11 +175,15 @@ databases:
   - id: pg_main
     engine: postgres
     dsn: "postgres://..."
-    pool: { max_conns: 20 }
+    max_conns: 20
   - id: ora_billing
     engine: oracle
     dsn: "oracle://..."
 ```
+
+The keys above are the ones the loader reads, so the block is a working
+configuration rather than a sketch; `configs/dbbridge.yaml` is the maintained
+example.
 
 ## 9. Security
 

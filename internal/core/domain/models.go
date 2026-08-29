@@ -164,7 +164,13 @@ type QueryRecord struct {
 	Stats           QueryStats   `json:"stats"`
 	Result          *ResultRef   `json:"result,omitzero"`
 	IdempotencyKey  string       `json:"idempotency_key,omitempty"`
-	LeaseDeadline   time.Time    `json:"lease_deadline,omitzero"`
+	// LeaseDeadline is derived from the owner's lease key on every read and is
+	// never persisted: a MetaStore fills it in from the key's remaining TTL.
+	// Marshalling it wrote a snapshot into the record itself, and the paths that
+	// read a record and write it back - the owner reaper and the GC sweep - then
+	// stored a deadline that had already passed, which a later read with no live
+	// lease would hand back as if it were current (spec §4).
+	LeaseDeadline time.Time `json:"-"`
 	// Subject is the authenticated caller that submitted the query. Knowing a
 	// query ID used to be enough to read anyone's SQL, status and result; the
 	// subject is what the read paths check against. Records written before
