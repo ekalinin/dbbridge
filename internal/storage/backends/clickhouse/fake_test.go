@@ -33,6 +33,8 @@ type fakeDB struct {
 	// tables counts CREATE TABLE statements, so a test can tell that the
 	// constructor issued one.
 	tables int
+	// failCreate makes CREATE TABLE fail, for the constructor's error path.
+	failCreate bool
 	// failInsertAt makes the nth insert (1-based) fail, for the rollback path.
 	// Zero never fails.
 	failInsertAt int
@@ -140,7 +142,11 @@ func (s *fakeStmt) Exec(args []driver.Value) (driver.Result, error) {
 	case strings.HasPrefix(q, "CREATE TABLE"):
 		c.state.mu.Lock()
 		c.state.tables++
+		fail := c.state.failCreate
 		c.state.mu.Unlock()
+		if fail {
+			return nil, errors.New("clickhouse-fake: create table rejected")
+		}
 		return driver.RowsAffected(0), nil
 
 	case strings.HasPrefix(q, "INSERT INTO"):

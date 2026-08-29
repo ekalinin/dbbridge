@@ -74,6 +74,27 @@ func TestNewStoreCreatesTheTable(t *testing.T) {
 	}
 }
 
+// TestNewClickHouseResultStoreRejectsABadDSN goes through the real constructor,
+// which is the only place the "clickhouse" driver name is used. A DSN that
+// cannot be parsed has to come back as an error from here, since app.go builds
+// every configured backend before serving.
+func TestNewClickHouseResultStoreRejectsABadDSN(t *testing.T) {
+	if _, err := NewClickHouseResultStore("://nonsense", "dbbridge_results"); err == nil {
+		t.Fatal("NewClickHouseResultStore accepted an unparseable DSN")
+	}
+}
+
+// TestNewStoreFailsWhenTheTableCannotBeCreated: the store is built at startup
+// from the sections the configuration asks for, so a database that refuses the
+// schema has to stop the process rather than leave a store that fails on the
+// first query.
+func TestNewStoreFailsWhenTheTableCannotBeCreated(t *testing.T) {
+	// The empty table name also pins the default the constructor falls back to.
+	if _, err := newStore(openFake(t, &fakeDB{failCreate: true}), ""); err == nil {
+		t.Fatal("newStore succeeded against a database that refused CREATE TABLE")
+	}
+}
+
 // TestRoundTripIsByteExact is the property SupportsFormat promises for JSONL:
 // what Writer took has to be what Reader gives back, or the recorded Checksum
 // and SizeBytes stop describing the served bytes (I4).
@@ -174,6 +195,32 @@ func TestDeleteRemovesTheResult(t *testing.T) {
 	}
 	if got := read(t, store, ref); got != "" {
 		t.Errorf("reading a deleted result returned %q, want nothing", got)
+	}
+}
+
+// TestMissingLocatorReadsEmpty pins what this backend does with a locator that
+// was never written - the fs and s3 stores fail on one, because there the result
+// is an object that is simply not there. A ClickHouse result is a set of rows,
+// and selecting none of them is a valid answer, so Reader hands back an empty
+// stream and Stat reports zeroes. Delete is idempotent on all three.
+func TestMissingLocatorReadsEmpty(t *testing.T) {
+	store := newFakeStore(t, &fakeDB{})
+	ref := domain.ResultRef{Backend: "clickhouse", Locator: "q-never-written", Format: "jsonl"}
+
+	if got := read(t, store, ref); got != "" {
+		t.Errorf("Reader on a missing locator returned %q, want nothing", got)
+	}
+
+	got, err := store.Stat(t.Context(), ref)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got.RowCount != 0 || got.SizeBytes != 0 {
+		t.Errorf("Stat = {rows: %d, bytes: %d}, want zeroes", got.RowCount, got.SizeBytes)
+	}
+
+	if err := store.Delete(t.Context(), ref); err != nil {
+		t.Errorf("Delete of a missing locator: %v", err)
 	}
 }
 
