@@ -129,7 +129,8 @@ PENDING → RUNNING → SUCCEEDED
 make build          # compile → bin/dbbridge
 make test-unit      # go test ./internal/... -short
 make test-integration  # requires live DBs and Redis (make up first)
-make test-containers   # real Redis/PostgreSQL/MySQL/MinIO via testcontainers
+make test-containers   # real Redis/PostgreSQL/MySQL/MinIO/ClickHouse via testcontainers
+make test-containers-oracle  # the same for Oracle, opt-in: its image is ~6 GB
 make vulncheck      # govulncheck
 make lint           # golangci-lint
 make check          # vet + lint

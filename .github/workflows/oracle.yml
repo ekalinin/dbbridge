@@ -1,0 +1,38 @@
+name: Oracle
+
+# Oracle is the only engine not covered by the CI containers job. Its image
+# unpacks to about 6 GB, which is too much to pull on every pull request for an
+# engine the four others do not touch, so it runs here instead: weekly, on
+# demand, and on any pull request that changes the driver or the test itself.
+on:
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'internal/db/drivers/oracle/**'
+      - 'test/integration/oracle_test.go'
+      - '.github/workflows/oracle.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle:
+    name: Integration (Oracle)
+    runs-on: ubuntu-latest
+    # The image pull dominates: the database itself is ready seconds after the
+    # container starts, because the tag is a "faststart" one.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: go test -tags=integration,oracle
+        run: make test-containers-oracle
