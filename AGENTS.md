@@ -17,7 +17,8 @@ make run                      # build + run with configs/dbbridge-blue.yaml
 # Tests
 make test-unit                # go test ./internal/... -short (unit tests only)
 make test-integration         # go test ./internal/... -timeout 120s (requires live DBs/Redis)
-make test-containers          # real Redis/PostgreSQL/MySQL/MinIO via testcontainers (needs Docker)
+make test-containers          # real Redis/PostgreSQL/MySQL/MinIO/ClickHouse via testcontainers (needs Docker)
+make test-containers-oracle   # the same for Oracle; opt-in behind a second build tag, its image is ~6 GB
 make test-e2e                 # go test ./test/e2e/... -timeout 300s
 go test ./internal/config/... # run a single package's tests
 
@@ -28,6 +29,7 @@ make fmt                      # gofmt -l -w .
 make check                    # vet + lint
 make ci                       # the fast CI job (fmt-check, vet, tests, race, lint, buf lint, govulncheck)
 make test-containers          # the other CI job: real backends via testcontainers, needs Docker
+make test-containers-oracle   # the weekly `Oracle` workflow; also runs on a PR touching the Oracle driver
 
 # Protobuf
 make proto                    # buf generate (regenerates internal/gen/)

@@ -11,7 +11,8 @@ GO_BUILD      := CGO_ENABLED=0 go build $(LDFLAGS)
 
 .PHONY: all build clean run \
         proto proto-lint \
-        test test-unit test-integration test-containers test-e2e test-all test-race \
+        test test-unit test-integration test-containers test-containers-oracle \
+        test-e2e test-all test-race \
         vulncheck \
         lint vet fmt fmt-check check ci \
         docker-build docker-push \
@@ -68,6 +69,16 @@ endif
 test-containers:
 	$(CONTAINER_ENV) go test -race -tags=integration ./test/integration/... -count=1 -timeout 900s
 
+# Oracle, kept out of the target above by a second build tag. There is no
+# testcontainers module for this engine and gvenzl/oracle-free unpacks to about
+# 6 GB, so putting it in the default run would make every pull request pay for
+# an image the other four engines do not need. Run on demand, or by the weekly
+# `Oracle` workflow. -run narrows the binary to the Oracle group: the `oracle`
+# tag adds to `integration` rather than replacing it, so without it the whole
+# container suite would run a second time.
+test-containers-oracle:
+	$(CONTAINER_ENV) go test -race -tags=integration,oracle ./test/integration/... -count=1 -timeout 900s -run TestOracle
+
 test-e2e:
 	go test ./test/e2e/... -count=1 -timeout 300s
 
@@ -93,10 +104,14 @@ lint:
 
 # The integration package is cut out by its build tag, and a package whose files
 # are all cut out is skipped by ./... without a word, so those files would
-# otherwise not be vetted or compiled outside the container job.
+# otherwise not be vetted or compiled outside the container job. The Oracle
+# files need the pass of their own: they carry a second tag, so the line above
+# does not reach them and they would rot unnoticed between runs of a job that
+# only fires weekly.
 vet:
 	go vet ./...
 	go vet -tags=integration ./test/integration/...
+	go vet -tags=integration,oracle ./test/integration/...
 
 fmt:
 	gofmt -l -w .

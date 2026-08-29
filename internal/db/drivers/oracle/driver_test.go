@@ -42,10 +42,11 @@ func TestOpenRejectsMalformedDSN(t *testing.T) {
 	}
 }
 
-// TestPool covers the wrappers around database/sql. Open itself pings, so a
-// pool cannot be built through it without a server, and the suite has no
-// Oracle container to point one at (#29): the driver's own pool type over a
-// fake handle is all the coverage this engine gets for now.
+// TestPool covers the wrappers around database/sql without a server: Open
+// pings, so a pool cannot be built through it here, and the pool type is
+// checked over a fake handle instead. The same wrappers run against a real
+// Oracle in test/integration's TestOracle, which is opt-in - see `make
+// test-containers-oracle`.
 func TestPool(t *testing.T) {
 	dbtest.CheckSQLPool(t, func(handle *sql.DB) db.Pool { return &oraclePool{db: handle} })
 }
