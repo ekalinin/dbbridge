@@ -129,3 +129,49 @@ func TestEnsureMeterProvider_RejectsLateConfiguration(t *testing.T) {
 		t.Error("an OTLP endpoint arriving after the provider was built was accepted silently")
 	}
 }
+
+// TestNewOTLPMetricReader covers the reader InitOTel adds beside the Prometheus
+// one. The exporter is built against an endpoint nothing is listening on: gRPC
+// dials lazily, so construction has to succeed regardless - a collector that is
+// down at startup must not stop the process from serving.
+func TestNewOTLPMetricReader(t *testing.T) {
+	reader, err := newOTLPMetricReader(context.Background(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("newOTLPMetricReader against an unreachable collector: %v", err)
+	}
+	if reader == nil {
+		t.Fatal("nil reader")
+	}
+
+	// A reader that cannot be shut down would hold the process open past the
+	// budget app.shutdownTelemetry allows it.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- reader.Shutdown(ctx) }()
+	select {
+	case <-done:
+		// An export attempt against a dead endpoint may or may not surface an
+		// error here; returning at all is the property under test.
+	case <-time.After(10 * time.Second):
+		t.Fatal("the OTLP reader did not shut down")
+	}
+}
+
+// TestInitOTel_MeterProviderIsBuiltOnce is the other half of
+// TestEnsureMeterProvider_RejectsLateConfiguration: once the provider exists,
+// asking for it again without new configuration hands back the same instance
+// rather than building a second Prometheus collector on the default registry.
+func TestInitOTel_MeterProviderIsBuiltOnce(t *testing.T) {
+	first, err := ensureMeterProvider(nil, "")
+	if err != nil {
+		t.Fatalf("ensureMeterProvider: %v", err)
+	}
+	second, err := ensureMeterProvider(nil, "")
+	if err != nil {
+		t.Fatalf("ensureMeterProvider a second time: %v", err)
+	}
+	if first != second {
+		t.Error("a second call built another meter provider; the Prometheus collector would be registered twice")
+	}
+}

@@ -21,12 +21,21 @@ type ClickHouseResultStore struct {
 }
 
 func NewClickHouseResultStore(dsn, table string) (*ClickHouseResultStore, error) {
-	if table == "" {
-		table = "dbbridge_results"
-	}
 	dbConn, err := sql.Open("clickhouse", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open clickhouse connection for storage: %w", err)
+	}
+	return newStore(dbConn, table)
+}
+
+// newStore builds the store over an existing handle and creates its table.
+// Splitting it out of NewClickHouseResultStore is what lets the tests reach the
+// chunking and the round trip over a fake database/sql driver: the driver name
+// is fixed here, and the real one is already registered by the blank import
+// above, so there is no way to substitute one through the DSN.
+func newStore(dbConn *sql.DB, table string) (*ClickHouseResultStore, error) {
+	if table == "" {
+		table = "dbbridge_results"
 	}
 
 	// Create results table
