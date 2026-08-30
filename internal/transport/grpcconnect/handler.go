@@ -321,7 +321,6 @@ func mapToProtoStats(s domain.QueryStats) *v1.QueryStats {
 		DbExecDurationMs:       s.DBExecDuration.Milliseconds(),
 		StorageWriteDurationMs: s.StorageWriteDuration.Milliseconds(),
 		TotalDurationMs:        s.TotalDuration.Milliseconds(),
-		Retries:                s.Retries,
 	}
 }
 

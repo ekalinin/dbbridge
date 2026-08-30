@@ -47,7 +47,11 @@ message QueryStats {
   int64 db_exec_duration_ms = 3;
   int64 storage_write_duration_ms = 4;
   int64 total_duration_ms = 5;
-  int32 retries = 6;
+  // Tag 6 held `retries`, which nothing ever incremented, so it always reported
+  // zero. Reserved so a later field cannot reuse the tag and have an old client
+  // decode its value as a retry count.
+  reserved 6;
+  reserved "retries";
 }
 
 message ResultRef {

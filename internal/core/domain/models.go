@@ -136,7 +136,6 @@ type QueryStats struct {
 	DBExecDuration       time.Duration `json:"db_exec_duration"`
 	StorageWriteDuration time.Duration `json:"storage_write_duration"`
 	TotalDuration        time.Duration `json:"total_duration"`
-	Retries              int32         `json:"retries"`
 }
 
 // ResultRef holds metadata about the serialized query results file.

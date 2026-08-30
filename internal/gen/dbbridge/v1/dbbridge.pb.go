@@ -233,7 +233,6 @@ type QueryStats struct {
 	DbExecDurationMs       int64                  `protobuf:"varint,3,opt,name=db_exec_duration_ms,json=dbExecDurationMs,proto3" json:"db_exec_duration_ms,omitempty"`
 	StorageWriteDurationMs int64                  `protobuf:"varint,4,opt,name=storage_write_duration_ms,json=storageWriteDurationMs,proto3" json:"storage_write_duration_ms,omitempty"`
 	TotalDurationMs        int64                  `protobuf:"varint,5,opt,name=total_duration_ms,json=totalDurationMs,proto3" json:"total_duration_ms,omitempty"`
-	Retries                int32                  `protobuf:"varint,6,opt,name=retries,proto3" json:"retries,omitempty"`
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
 }
@@ -299,13 +298,6 @@ func (x *QueryStats) GetStorageWriteDurationMs() int64 {
 func (x *QueryStats) GetTotalDurationMs() int64 {
 	if x != nil {
 		return x.TotalDurationMs
-	}
-	return 0
-}
-
-func (x *QueryStats) GetRetries() int32 {
-	if x != nil {
-		return x.Retries
 	}
 	return 0
 }
@@ -1494,15 +1486,14 @@ const file_dbbridge_v1_dbbridge_proto_rawDesc = "" +
 	"QueryError\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x1c\n" +
-	"\tretryable\x18\x03 \x01(\bR\tretryable\"\xfe\x01\n" +
+	"\tretryable\x18\x03 \x01(\bR\tretryable\"\xf3\x01\n" +
 	"\n" +
 	"QueryStats\x12\x1b\n" +
 	"\trows_read\x18\x01 \x01(\x03R\browsRead\x12#\n" +
 	"\rbytes_written\x18\x02 \x01(\x03R\fbytesWritten\x12-\n" +
 	"\x13db_exec_duration_ms\x18\x03 \x01(\x03R\x10dbExecDurationMs\x129\n" +
 	"\x19storage_write_duration_ms\x18\x04 \x01(\x03R\x16storageWriteDurationMs\x12*\n" +
-	"\x11total_duration_ms\x18\x05 \x01(\x03R\x0ftotalDurationMs\x12\x18\n" +
-	"\aretries\x18\x06 \x01(\x05R\aretries\"\xaf\x01\n" +
+	"\x11total_duration_ms\x18\x05 \x01(\x03R\x0ftotalDurationMsJ\x04\b\x06\x10\aR\aretries\"\xaf\x01\n" +
 	"\tResultRef\x12\x18\n" +
 	"\abackend\x18\x01 \x01(\tR\abackend\x12\x18\n" +
 	"\alocator\x18\x02 \x01(\tR\alocator\x12\x1d\n" +

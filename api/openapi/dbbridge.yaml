@@ -634,8 +634,6 @@ components:
         total_duration_ms:
           type: integer
           format: int64
-        retries:
-          type: integer
 
     ResultRef:
       type: object
