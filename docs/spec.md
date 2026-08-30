@@ -66,7 +66,7 @@ that died halfway through.
 
 - `QueryOptions`: `Timeout time.Duration` (0 = no limit, default), `Mode` (`async` default | `sync`), `ResultTTL time.Duration` (default 24h), `IdempotencyKey string`, `ResultFormat` (`jsonl` default | `csv` | `parquet`), `StorageBackend string` (default override). Options are validated against these sets before any side effect: `ResultFormat` reaches the filesystem as part of a file name, so an unvalidated value is a path traversal.
 - `QueryRecord`: `ID`, `DatabaseID`, `SQL`, `Options`, `State`, `OwnerInstanceID`, `CreatedAt/StartedAt/FinishedAt`, `Error *QueryError`, `Stats QueryStats`, `Result *ResultRef`, `IdempotencyKey`, `LeaseDeadline`, `Subject`. `LeaseDeadline` is derived from the owner's lease key, not stored in the record: a heartbeat that rewrote the record would overwrite a concurrent terminal write.
-- `QueryStats`: `RowsRead`, `BytesWritten`, `DBExecDuration`, `StorageWriteDuration`, `TotalDuration`, `Retries`.
+- `QueryStats`: `RowsRead`, `BytesWritten`, `DBExecDuration`, `StorageWriteDuration`, `TotalDuration`. There is no retry counter: nothing retries `Pool.Exec`, and a field that always reports zero is worse than an absent one. Proto tag 6 stays reserved for it.
 - `ResultRef`: `Backend string`, `Locator string` (path/key/table), `SizeBytes`, `RowCount`, `Format`, `Checksum`.
 - `DatabaseInfo`: `ID`, `Engine` (oracle|postgres|mysql|clickhouse), `DisplayName`, `Healthy bool`.
 - `QueryError`: `Code` (enum), `Message`, `Retryable bool`.

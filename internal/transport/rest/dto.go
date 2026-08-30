@@ -28,7 +28,6 @@ type queryStatsDTO struct {
 	DBExecDurationMs       int64 `json:"db_exec_duration_ms"`
 	StorageWriteDurationMs int64 `json:"storage_write_duration_ms"`
 	TotalDurationMs        int64 `json:"total_duration_ms"`
-	Retries                int32 `json:"retries"`
 }
 
 type resultRefDTO struct {
@@ -91,7 +90,6 @@ func toStatsDTO(s domain.QueryStats) queryStatsDTO {
 		DBExecDurationMs:       s.DBExecDuration.Milliseconds(),
 		StorageWriteDurationMs: s.StorageWriteDuration.Milliseconds(),
 		TotalDurationMs:        s.TotalDuration.Milliseconds(),
-		Retries:                s.Retries,
 	}
 }
 
